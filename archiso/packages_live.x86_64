@@ -45,6 +45,7 @@ kbd
 cage
 foot
 ttf-jetbrains-mono-nerd
+otf-ipaexfont
 
 # CLI utilities & diagnostics
 git
