@@ -1,4 +1,4 @@
-# Tsukuyomi OS core target packages (CachyOS base + Limine + Plymouth + SDDM + Fastfetch)
+# Tsukuyomi OS core target packages (CachyOS base + Limine + Plymouth + SDDM + CLI tools)
 base
 base-devel
 linux-cachyos
@@ -36,6 +36,7 @@ power-profiles-daemon
 sudo
 git
 vim
+neovim
 nano
 less
 curl
@@ -47,6 +48,8 @@ noto-fonts
 noto-fonts-cjk
 noto-fonts-emoji
 ttf-jetbrains-mono-nerd
+ttf-material-symbols-variable
+adw-gtk-theme
 qt6-multimedia-ffmpeg
 hyprland-qt-support
 cachyos-keyring
@@ -56,3 +59,30 @@ cachyos-v4-mirrorlist
 cachyos-hooks
 cachyos-settings
 paru
+yay
+
+# Daily-driver CLI & diagnostic tools
+htop
+btop
+ripgrep
+fd
+bat
+eza
+fzf
+zoxide
+tmux
+tree
+unzip
+zip
+7zip
+man-db
+man-pages
+tealdeer
+usbutils
+pciutils
+lsof
+bind
+openssh
+rsync
+github-cli
+wl-clipboard
