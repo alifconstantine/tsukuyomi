@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Tsukuyomi live installer kiosk session (launched on tty1 by root .zlogin / .bash_profile).
+# Adapted from Ryoku's ryoku-installer-session: runs cage + foot + tsukuyomi-tui when DRM/KMS
+# is available, and falls back to the plain VT console if no GPU/DRM device is present.
+set -uo pipefail
+
+export COLORTERM=truecolor
+export WLR_RENDERER=pixman
+export WLR_RENDERER_ALLOW_SOFTWARE=1
+
+log="/var/log/tsukuyomi-session.log"
+sysfs="${TSUKUYOMI_SYSFS:-/sys}"
+
+native_res() {
+  local c st mode
+  for c in "$sysfs"/class/drm/card*-*; do
+    [[ -r $c/status && -r $c/modes ]] || continue
+    read -r st <"$c/status" || continue
+    [[ $st == connected ]] || continue
+    read -r mode <"$c/modes" || continue
+    [[ $mode == +([0-9])x+([0-9])* ]] || continue
+    echo "${mode%%x*} ${mode#*x}"
+    return 0
+  done
+  echo "1920 1080"
+}
+
+wait_for_kms() {
+  local n=0
+  while ((n++ < 25)); do
+    compgen -G '/dev/dri/card*' >/dev/null 2>&1 && grep -qxs connected "$sysfs"/class/drm/card*-*/status && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+foot_pt() {
+  local h=$1 pt=$(((14 * $1 + 540) / 1080))
+  ((h > 0)) || pt=14
+  ((pt < 8)) && pt=8
+  ((pt > 32)) && pt=32
+  echo "$pt"
+}
+
+run_graphical() {
+  command -v cage >/dev/null 2>&1 && command -v foot >/dev/null 2>&1 || return 1
+  compgen -G '/dev/dri/card*' >/dev/null 2>&1 || return 1
+
+  local cw ch pt
+  read -r cw ch <<<"$(native_res)"
+  pt=$(foot_pt "$ch")
+  echo "tsukuyomi: panel ${cw}x${ch}, kiosk font ${pt}pt." >>"$log"
+
+  env TSUKUYOMI_SESSION=graphical \
+    cage -m last -- foot \
+      -o term=xterm-256color \
+      -o main.dpi-aware=no \
+      -o colors.background=060607 \
+      -o colors.foreground=eae2d5 \
+      -f "JetBrainsMono Nerd Font:size=$pt" \
+      -e /usr/local/bin/tsukuyomi-tui >"$log" 2>&1
+}
+
+run_console() {
+  echo "tsukuyomi: starting TUI installer on console VT." >&2
+  TSUKUYOMI_SESSION=console /usr/local/bin/tsukuyomi-tui
+}
+
+recovery_notice() {
+  cat >&2 <<'EOF'
+
+tsukuyomi: installer exited; you are at a root recovery shell.
+  - Re-run TUI installer : tsukuyomi-tui
+  - CLI backend          : tsukuyomi-install
+  - Session log          : /var/log/tsukuyomi-session.log
+
+EOF
+}
+
+if ! command -v tsukuyomi-tui >/dev/null 2>&1; then
+  echo "tsukuyomi: FATAL: tsukuyomi-tui is missing from this live image." >&2
+  recovery_notice
+  exit 0
+fi
+
+wait_for_kms || echo "tsukuyomi: no KMS connector detected; falling back to console VT." >>"$log"
+
+tries=0
+while true; do
+  if run_graphical; then
+    break
+  fi
+  tries=$((tries + 1))
+  if ((tries >= 3)); then
+    echo "tsukuyomi: graphical kiosk failed after 3 attempts; falling back to VT (see $log)." >&2
+    run_console
+    break
+  fi
+  sleep 1
+done
+
+recovery_notice

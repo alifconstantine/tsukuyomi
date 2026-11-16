@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Tsukuyomi OS installation orchestrator.
+# Driven by TSUKUYOMI_* environment variables (from tsukuyomi-tui or CLI).
+# Set TSUKUYOMI_DRYRUN=1 to exercise the complete install flow without disk writes.
+set -euo pipefail
+
+SELF=$(realpath "${BASH_SOURCE[0]}")
+BACKEND_DIR=$(dirname "$SELF")
+LIB_DIR="$BACKEND_DIR/lib"
+
+# shellcheck source=lib/common.sh
+source "$LIB_DIR/common.sh"
+# shellcheck source=lib/preflight.sh
+source "$LIB_DIR/preflight.sh"
+# shellcheck source=lib/disk.sh
+source "$LIB_DIR/disk.sh"
+# shellcheck source=lib/luks.sh
+source "$LIB_DIR/luks.sh"
+# shellcheck source=lib/filesystems.sh
+source "$LIB_DIR/filesystems.sh"
+# shellcheck source=lib/pacstrap.sh
+source "$LIB_DIR/pacstrap.sh"
+# shellcheck source=lib/configure.sh
+source "$LIB_DIR/configure.sh"
+# shellcheck source=lib/desktop.sh
+source "$LIB_DIR/desktop.sh"
+# shellcheck source=lib/bootloader.sh
+source "$LIB_DIR/bootloader.sh"
+
+# Defaults
+: "${TSUKUYOMI_HOSTNAME:=tsukuyomi}"
+: "${TSUKUYOMI_USERNAME:=}"
+: "${TSUKUYOMI_FULLNAME:=}"
+: "${TSUKUYOMI_PASSWORD_HASH:=}"
+: "${TSUKUYOMI_KEYMAP:=us}"
+: "${TSUKUYOMI_LOCALE:=en_US.UTF-8}"
+: "${TSUKUYOMI_TIMEZONE:=Asia/Jakarta}"
+: "${TSUKUYOMI_PROFILE:=auto}"
+: "${TSUKUYOMI_DISK:=}"
+: "${TSUKUYOMI_ESP_GIB:=1}"
+: "${TSUKUYOMI_SWAP_GIB:=4}"
+: "${TSUKUYOMI_ENCRYPT:=0}"
+: "${TSUKUYOMI_LUKS_PASSPHRASE:=}"
+: "${TSUKUYOMI_SUBVOL_SNAPSHOTS:=1}"
+: "${TSUKUYOMI_INSTALL_AUR:=1}"
+: "${TSUKUYOMI_SHARE:=/usr/share/tsukuyomi}"
+: "${TSUKUYOMI_DRYRUN:=}"
+
+trap 'tsukuyomi_cleanup_on_err $?' ERR
+
+main() {
+  step preflight
+  tsukuyomi_preflight
+
+  step disk
+  tsukuyomi_partition_whole
+
+  step luks
+  tsukuyomi_luks_setup
+
+  step filesystems
+  tsukuyomi_filesystems
+  tsukuyomi_mount
+
+  step pacstrap
+  tsukuyomi_pacstrap
+
+  step configure
+  tsukuyomi_configure
+
+  step desktop
+  tsukuyomi_deploy_desktop
+
+  step bootloader
+  tsukuyomi_bootloader
+
+  step finalize
+  tsukuyomi_finalize
+
+  printf '@@TSUKUYOMI_DONE\n'
+}
+
+main "$@"

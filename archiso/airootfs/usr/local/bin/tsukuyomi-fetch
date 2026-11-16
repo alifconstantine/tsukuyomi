@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Tsukuyomi Fastfetch wrapper with easy Tsukuyomi <-> Arch logo switching.
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastfetch"
+SYSTEM_DIR="/usr/share/tsukuyomi/fastfetch"
+
+usage() {
+  cat <<'EOF'
+Usage: tsukuyomi-fetch [OPTIONS] [-- FASTFETCH_ARGS...]
+
+Options:
+  -l, --logo <tsukuyomi|arch>         Run fastfetch with the chosen logo once
+      --set-default <tsukuyomi|arch>  Persist default logo for plain `fastfetch`
+  -h, --help                          Show this help message
+EOF
+}
+
+resolve_preset() {
+  local mode=$1
+  local fname="config-${mode}.jsonc"
+  if [[ -f "$CONFIG_DIR/$fname" ]]; then
+    printf '%s\n' "$CONFIG_DIR/$fname"
+  elif [[ -f "$SYSTEM_DIR/$fname" ]]; then
+    printf '%s\n' "$SYSTEM_DIR/$fname"
+  else
+    echo "tsukuyomi-fetch: preset '$mode' not found" >&2
+    return 1
+  fi
+}
+
+logo_mode=""
+set_default=""
+extra_args=()
+
+while (($# > 0)); do
+  case $1 in
+    -l|--logo)
+      [[ $# -ge 2 ]] || { echo "tsukuyomi-fetch: $1 requires an argument" >&2; exit 2; }
+      logo_mode=$2
+      shift 2
+      ;;
+    --logo=*)
+      logo_mode=${1#--logo=}
+      shift
+      ;;
+    --set-default)
+      [[ $# -ge 2 ]] || { echo "tsukuyomi-fetch: $1 requires an argument" >&2; exit 2; }
+      set_default=$2
+      shift 2
+      ;;
+    --set-default=*)
+      set_default=${1#--set-default=}
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      extra_args+=("$@")
+      break
+      ;;
+    *)
+      extra_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ -n $set_default ]]; then
+  case $set_default in
+    tsukuyomi|arch) ;;
+    *) echo "tsukuyomi-fetch: unsupported logo '$set_default' (want tsukuyomi|arch)" >&2; exit 2 ;;
+  esac
+  mkdir -p "$CONFIG_DIR"
+  preset=$(resolve_preset "$set_default")
+  cp -f "$preset" "$CONFIG_DIR/config.jsonc"
+  echo "Default fastfetch logo set to '$set_default' ($CONFIG_DIR/config.jsonc)"
+  exit 0
+fi
+
+if [[ -n $logo_mode ]]; then
+  case $logo_mode in
+    tsukuyomi|arch) ;;
+    *) echo "tsukuyomi-fetch: unsupported logo '$logo_mode' (want tsukuyomi|arch)" >&2; exit 2 ;;
+  esac
+  preset=$(resolve_preset "$logo_mode")
+  exec fastfetch --config "$preset" "${extra_args[@]}"
+fi
+
+if [[ -f "$CONFIG_DIR/config.jsonc" ]]; then
+  exec fastfetch --config "$CONFIG_DIR/config.jsonc" "${extra_args[@]}"
+elif [[ -f "$SYSTEM_DIR/config-tsukuyomi.jsonc" ]]; then
+  exec fastfetch --config "$SYSTEM_DIR/config-tsukuyomi.jsonc" "${extra_args[@]}"
+else
+  exec fastfetch "${extra_args[@]}"
+fi

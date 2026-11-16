@@ -1,0 +1,4 @@
+DISTRIB_ID="Tsukuyomi"
+DISTRIB_RELEASE="rolling"
+DISTRIB_CODENAME="tsukuyomi"
+DISTRIB_DESCRIPTION="Tsukuyomi OS"

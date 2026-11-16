@@ -1,0 +1,8 @@
+[SddmGreeterTheme]
+Name=Tsukuyomi
+Description=Minimalist dark obsidian and crimson SDDM greeter for Tsukuyomi OS.
+Author=Tsukuyomi OS
+Type=sddm-theme
+MainScript=Main.qml
+ConfigFile=theme.conf
+QtVersion=6

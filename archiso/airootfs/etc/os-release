@@ -1,0 +1,11 @@
+NAME="Tsukuyomi"
+PRETTY_NAME="Tsukuyomi OS"
+ID=tsukuyomi
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="38;2;201;42;42"
+HOME_URL="https://tsukuyomi-os.local"
+DOCUMENTATION_URL="https://wiki.cachyos.org/"
+SUPPORT_URL="https://tsukuyomi-os.local"
+BUG_REPORT_URL="https://tsukuyomi-os.local"
+LOGO=tsukuyomi

@@ -1,0 +1,9 @@
+
+  月読  TSUKUYOMI OS — Live Installer
+  Base: CachyOS + Hyprland + end-4 (illogical-impulse)
+
+  • Re-launch TUI installer : tsukuyomi-tui
+  • Dry-run test            : tsukuyomi-tui --dry-run
+  • CLI installer backend   : tsukuyomi-install
+  • Session log             : /var/log/tsukuyomi-session.log
+
