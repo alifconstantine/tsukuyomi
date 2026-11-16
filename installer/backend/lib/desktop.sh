@@ -100,7 +100,7 @@ $user ALL=(ALL:ALL) NOPASSWD: ALL
 EOF
     run chmod 0440 /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
     run arch-chroot /mnt su - "$user" -c \
-      "paru -S --noconfirm --needed ${aur_pkgs[*]}" \
+      "paru -S --noconfirm --skipreview --needed ${aur_pkgs[*]}" \
       || log "warning: some AUR packages failed to build (installable later via paru)"
     run rm -f /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
   fi
