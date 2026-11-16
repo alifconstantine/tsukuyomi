@@ -1,0 +1,57 @@
+# Tsukuyomi OS live installer ISO packages (Ryoku-style minimal cage + foot + TUI).
+# Target desktop packages (Hyprland, end-4, SDDM, Plymouth, etc.) are installed
+# to /mnt by tsukuyomi-install from /usr/share/tsukuyomi/packages/.
+
+base
+linux-cachyos
+linux-firmware
+mkinitcpio
+mkinitcpio-archiso
+amd-ucode
+intel-ucode
+syslinux
+
+# Keyrings & CachyOS mirrors
+archlinux-keyring
+cachyos-keyring
+cachyos-mirrorlist
+cachyos-v3-mirrorlist
+cachyos-v4-mirrorlist
+
+# Installer backend toolchain
+arch-install-scripts
+parted
+gptfdisk
+btrfs-progs
+dosfstools
+cryptsetup
+e2fsprogs
+ntfs-3g
+efibootmgr
+limine
+reflector
+lvm2
+mdadm
+pciutils
+
+# Networking (nmcli + iwd + wpa_supplicant)
+networkmanager
+iwd
+wpa_supplicant
+wireless-regdb
+kbd
+
+# Minimal Wayland kiosk + truecolor terminal for tsukuyomi-tui
+cage
+foot
+ttf-jetbrains-mono-nerd
+
+# CLI utilities & diagnostics
+git
+curl
+jq
+sudo
+less
+vim
+openssl
+fastfetch
