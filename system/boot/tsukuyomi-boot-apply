@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Re-apply Tsukuyomi Plymouth theme, Limine visual globals, and rebuild initramfs/UKI.
+set -euo pipefail
+
+theme_dir="/usr/share/plymouth/themes/tsukuyomi"
+boot_src="/usr/share/tsukuyomi/boot"
+esp="/boot"
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "tsukuyomi-boot-apply: must run as root" >&2
+  exit 1
+fi
+
+if [[ -d "$theme_dir" ]] && command -v plymouth-set-default-theme >/dev/null 2>&1; then
+  plymouth-set-default-theme tsukuyomi >/dev/null 2>&1 || true
+fi
+
+if [[ -f "$boot_src/limine/limine.conf" && -f "$esp/limine.conf" ]]; then
+  tmp=$(mktemp)
+  cp "$esp/limine.conf" "$tmp"
+  for k in interface_branding interface_branding_color interface_help_color \
+    hash_mismatch_panic term_background backdrop term_palette \
+    term_palette_bright term_foreground term_foreground_bright \
+    term_background_bright; do
+    canon=$(grep -m1 "^$k:" "$boot_src/limine/limine.conf" || true)
+    [[ -n $canon ]] || continue
+    if grep -q "^$k:" "$tmp"; then
+      sed -i "s|^$k:.*|$canon|" "$tmp"
+    else
+      awk -v line="$canon" '!ins && /^\//{print line; ins=1} {print} END{if(!ins)print line}' "$tmp" >"$tmp.2" && mv "$tmp.2" "$tmp"
+    fi
+  done
+  if ! cmp -s "$tmp" "$esp/limine.conf"; then
+    cp -f "$esp/limine.conf" "$esp/limine.conf.bak" 2>/dev/null || true
+    cat "$tmp" >"$esp/limine.conf"
+  fi
+  rm -f "$tmp" "$tmp.2"
+fi
+
+if command -v limine-mkinitcpio >/dev/null 2>&1; then
+  limine-mkinitcpio
+elif command -v mkinitcpio >/dev/null 2>&1; then
+  mkinitcpio -P
+fi
