@@ -1,0 +1,20 @@
+# Hardware-specific GPU / virtualization packages selected automatically by the installer.
+
+[amd]
+mesa
+vulkan-radeon
+
+[intel]
+mesa
+vulkan-intel
+intel-media-driver
+
+[nvidia]
+nvidia-utils
+linux-cachyos-nvidia-open
+
+[vm]
+mesa
+vulkan-virtio
+qemu-guest-agent
+spice-vdagent
