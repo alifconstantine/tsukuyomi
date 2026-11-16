@@ -13,6 +13,31 @@ tsukuyomi_root_cmdline() {
   fi
 }
 
+tsukuyomi_limine_repoint_default() {
+  local conf=$1
+  [[ -z ${TSUKUYOMI_DRYRUN:-} && -f $conf ]] || return 0
+  local entry_path
+  entry_path=$(awk '
+    { t = $0; sub(/^[[:space:]]+/, "", t) }
+    t ~ /^\/[^\/]/                 { dir = t; sub(/^\/\+?/, "", dir); next }
+    t ~ /^\/\/[^\/]/ && dir != "" {
+      k = t; sub(/^\/\//, "", k)
+      if (k == "Snapshots") next
+      print dir "/" k
+      exit
+    }
+  ' "$conf")
+  [[ -n $entry_path ]] || return 0
+  local tmp
+  tmp=$(mktemp)
+  awk -v p="$entry_path" '
+    /^default_entry:/ { print "default_entry: " p; next }
+    { print }
+  ' "$conf" >"$tmp"
+  mv "$tmp" "$conf"
+  log "Limine default_entry set to: %s" "$entry_path"
+}
+
 tsukuyomi_bootloader() {
   local cmdline
   cmdline=$(tsukuyomi_root_cmdline)
@@ -27,18 +52,25 @@ tsukuyomi_bootloader() {
     write_file /mnt/etc/default/limine <<<"$def_content"
   fi
 
-  # Deploy /boot/limine.conf (ESP root only so no duplicate config shadows it)
-  if [[ -f "$TSUKUYOMI_SHARE/boot/limine/limine.conf" ]]; then
-    run install -m 0644 "$TSUKUYOMI_SHARE/boot/limine/limine.conf" /mnt/boot/limine.conf
-  fi
+  # Remove any shadowing limine.conf elsewhere on ESP
   run rm -rf /mnt/boot/limine /mnt/boot/EFI/limine/limine.conf
 
-  # Build UKI + initramfs
+  # Build UKI + initramfs and update /boot/limine.conf
   if chroot_has limine-mkinitcpio; then
+    # Write branding globals only; limine-mkinitcpio populates the /+Tsukuyomi OS tree.
+    if [[ -f "$TSUKUYOMI_SHARE/boot/limine/limine.conf" ]]; then
+      local globals
+      globals=$(awk '/^\/[^\/]/{exit} {print}' "$TSUKUYOMI_SHARE/boot/limine/limine.conf")
+      write_file /mnt/boot/limine.conf <<<"$globals"
+    fi
     log "building UKI via limine-mkinitcpio"
     run arch-chroot /mnt limine-mkinitcpio
     chroot_has limine-update && run arch-chroot /mnt limine-update
+    tsukuyomi_limine_repoint_default /mnt/boot/limine.conf
   else
+    if [[ -f "$TSUKUYOMI_SHARE/boot/limine/limine.conf" ]]; then
+      run install -m 0644 "$TSUKUYOMI_SHARE/boot/limine/limine.conf" /mnt/boot/limine.conf
+    fi
     log "building initramfs via mkinitcpio -P"
     run arch-chroot /mnt mkinitcpio -P
   fi
@@ -69,9 +101,10 @@ tsukuyomi_bootloader() {
     run arch-chroot /mnt snapper --no-dbus -c root create-config /
     run arch-chroot /mnt btrfs subvolume delete /.snapshots || true
     run arch-chroot /mnt mkdir -p /.snapshots
-    run arch-chroot /mnt mount -a
+    run arch-chroot /mnt mount /.snapshots
     run arch-chroot /mnt chmod 750 /.snapshots
     chroot_has limine-snapper-sync && run arch-chroot /mnt systemctl enable limine-snapper-sync.service
+    tsukuyomi_limine_repoint_default /mnt/boot/limine.conf
   fi
 }
 
