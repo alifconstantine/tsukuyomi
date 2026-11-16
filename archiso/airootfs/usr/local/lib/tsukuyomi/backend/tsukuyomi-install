@@ -18,6 +18,8 @@ source "$LIB_DIR/disk.sh"
 source "$LIB_DIR/luks.sh"
 # shellcheck source=lib/filesystems.sh
 source "$LIB_DIR/filesystems.sh"
+# shellcheck source=lib/mirrors.sh
+source "$LIB_DIR/mirrors.sh"
 # shellcheck source=lib/pacstrap.sh
 source "$LIB_DIR/pacstrap.sh"
 # shellcheck source=lib/configure.sh

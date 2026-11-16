@@ -69,6 +69,26 @@ tsukuyomi_hooks_restore() {
   done
 }
 
+tsukuyomi_pacstrap_with_retry() {
+  local -a pkgs=("$@")
+  if run pacstrap -K /mnt --noconfirm "${pkgs[@]}"; then
+    return 0
+  fi
+
+  log "pacstrap failed (mirror reset or transient TLS drop); cleaning partial cache, switching mirror tier, and retrying with --needed"
+  run_sh 'rm -f /mnt/var/cache/pacman/pkg/*.part 2>/dev/null || true'
+  tsukuyomi_mirrors_fallback || true
+
+  if run pacstrap -K /mnt --noconfirm --needed --overwrite '*' "${pkgs[@]}"; then
+    return 0
+  fi
+
+  log "retrying pacstrap once more with sequential downloads (ParallelDownloads=1)"
+  tsukuyomi_tune_pacman_downloads 1
+  run_sh 'rm -f /mnt/var/cache/pacman/pkg/*.part 2>/dev/null || true'
+  run pacstrap -K /mnt --noconfirm --needed --overwrite '*' "${pkgs[@]}"
+}
+
 tsukuyomi_pacstrap() {
   local base_file="$TSUKUYOMI_SHARE/packages/base.packages"
   local hw_file="$TSUKUYOMI_SHARE/packages/hardware.packages"
@@ -88,7 +108,6 @@ tsukuyomi_pacstrap() {
 
   mapfile -t -O "${#pkgs[@]}" pkgs < <(grep -vE '^[[:space:]]*(#|$)' "$end4_file")
 
-  # Deduplicate while preserving order
   local -a unique_pkgs=()
   local -A seen=()
   local p
@@ -102,14 +121,10 @@ tsukuyomi_pacstrap() {
 
   tsukuyomi_ensure_keyring
   tsukuyomi_hooks_quiet
-
-  if command -v reflector >/dev/null 2>&1 && [[ -z ${TSUKUYOMI_DRYRUN:-} ]]; then
-    log "ranking fastest Arch mirrors"
-    reflector --latest 10 --protocol https --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null || true
-  fi
+  tsukuyomi_rank_mirrors
 
   log "pacstrapping %d packages into /mnt" "${#unique_pkgs[@]}"
-  run pacstrap -K /mnt --noconfirm "${unique_pkgs[@]}"
+  tsukuyomi_pacstrap_with_retry "${unique_pkgs[@]}"
 
   log "writing /etc/fstab"
   run_sh "genfstab -U /mnt >> /mnt/etc/fstab"
