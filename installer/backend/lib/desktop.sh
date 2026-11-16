@@ -19,11 +19,17 @@ tsukuyomi_deploy_desktop() {
   fi
   run cp -a "$TSUKUYOMI_SHARE/." /mnt/usr/share/tsukuyomi/
 
-  # Plymouth theme
+  # Plymouth theme + ShowDelay=0 so loading bar renders immediately on boot
   if [[ -d "$TSUKUYOMI_SHARE/boot/plymouth/tsukuyomi" ]]; then
-    log "installing Tsukuyomi Plymouth theme"
-    run mkdir -p /mnt/usr/share/plymouth/themes/tsukuyomi
+    log "installing Tsukuyomi Plymouth theme (ShowDelay=0)"
+    run mkdir -p /mnt/usr/share/plymouth/themes/tsukuyomi /mnt/etc/plymouth
     run cp -a "$TSUKUYOMI_SHARE/boot/plymouth/tsukuyomi/." /mnt/usr/share/plymouth/themes/tsukuyomi/
+    write_file /mnt/etc/plymouth/plymouthd.conf <<'EOF'
+[Daemon]
+Theme=tsukuyomi
+ShowDelay=0
+DeviceTimeout=8
+EOF
     run arch-chroot /mnt plymouth-set-default-theme tsukuyomi
   fi
 
@@ -43,16 +49,32 @@ tsukuyomi_deploy_desktop() {
     run chmod 0600 /mnt/etc/NetworkManager/system-connections/*.nmconnection
   fi
 
-  # Install local [tsukuyomi-local] AUR repo packages if staged, else best-effort paru
+  # Temporary DNS inside chroot so uv and AUR helpers can resolve hosts
+  local made_resolv=0
+  if [[ -z ${TSUKUYOMI_DRYRUN:-} && ! -e /mnt/etc/resolv.conf && -e /etc/resolv.conf ]]; then
+    cp -L /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null && made_resolv=1 || true
+  fi
+
+  # Install local [tsukuyomi-local] AUR repo packages if staged, else per-package paru/yay
   tsukuyomi_install_aur_layer "$user"
 
   # Prepare end-4 Python venv if online (non-fatal if offline)
   if [[ -f "$TSUKUYOMI_SHARE/shell/requirements.txt" ]] && chroot_has uv; then
     log "setting up end-4 Quickshell Python environment (.venv)"
-    run arch-chroot /mnt su - "$user" -c \
+    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" bash -c \
       "mkdir -p ~/.local/state/quickshell && uv venv --prompt .venv ~/.local/state/quickshell/.venv -p 3.12 && uv pip install --python ~/.local/state/quickshell/.venv/bin/python -r /usr/share/tsukuyomi/shell/requirements.txt" \
       || log "warning: uv Python venv setup skipped or offline; run 'uv pip install' on first boot if needed"
   fi
+
+  if (( made_resolv == 1 )); then
+    rm -f /mnt/etc/resolv.conf 2>/dev/null || true
+  fi
+
+  # Refresh font cache so newly installed icon/UI fonts are immediately discovered
+  run arch-chroot /mnt fc-cache -f || true
+
+  # Point default web browser if one was selected
+  tsukuyomi_set_default_browser "$user"
 
   log "enabling target systemd services (sddm, NetworkManager, bluetooth, rtkit, power-profiles-daemon)"
   run arch-chroot /mnt systemctl enable \
@@ -62,10 +84,33 @@ tsukuyomi_deploy_desktop() {
     rtkit-daemon.service \
     power-profiles-daemon.service
 
-  # Enable ydotool user service globally for new users (end-4 virtual input helper)
   run mkdir -p /mnt/etc/systemd/user/default.target.wants
   if [[ -n ${TSUKUYOMI_DRYRUN:-} || -f /mnt/usr/lib/systemd/user/ydotool.service ]]; then
     run ln -sf /usr/lib/systemd/user/ydotool.service /mnt/etc/systemd/user/default.target.wants/ydotool.service
+  fi
+}
+
+tsukuyomi_set_default_browser() {
+  local user=$1 desktop=""
+  case "${TSUKUYOMI_BROWSER:-}" in
+    brave-bin) desktop="brave-browser.desktop" ;;
+    firefox) desktop="firefox.desktop" ;;
+    zen-browser-bin) desktop="zen.desktop" ;;
+    chromium) desktop="chromium.desktop" ;;
+    *) return 0 ;;
+  esac
+  if [[ -n ${TSUKUYOMI_DRYRUN:-} || -f "/mnt/usr/share/applications/$desktop" ]]; then
+    log "default browser: %s" "$desktop"
+    run mkdir -p "/mnt/home/$user/.config"
+    write_file "/mnt/home/$user/.config/mimeapps.list" <<EOF
+[Default Applications]
+text/html=$desktop
+x-scheme-handler/http=$desktop
+x-scheme-handler/https=$desktop
+x-scheme-handler/about=$desktop
+x-scheme-handler/unknown=$desktop
+EOF
+    run arch-chroot /mnt chown "$user:$user" "/home/$user/.config/mimeapps.list"
   fi
 }
 
@@ -93,15 +138,27 @@ tsukuyomi_install_aur_layer() {
   mapfile -t aur_pkgs < <(grep -vE '^[[:space:]]*(#|$|illogical-impulse-)' "$aur_file" || true)
   (( ${#aur_pkgs[@]} > 0 )) || return 0
 
+  local helper=""
   if chroot_has paru; then
-    log "installing end-4 AUR dependencies via paru (%d packages)" "${#aur_pkgs[@]}"
-    write_file /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp <<EOF
+    helper="paru"
+  elif chroot_has yay; then
+    helper="yay"
+  fi
+  [[ -n $helper ]] || return 0
+
+  log "installing %d end-4 AUR package(s) via %s (one-by-one)" "${#aur_pkgs[@]}" "$helper"
+  write_file /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp <<EOF
 $user ALL=(ALL:ALL) NOPASSWD: ALL
 EOF
-    run chmod 0440 /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
-    run arch-chroot /mnt su - "$user" -c \
-      "paru -S --noconfirm --skipreview --needed ${aur_pkgs[*]}" \
-      || log "warning: some AUR packages failed to build (installable later via paru)"
-    run rm -f /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
-  fi
+  run chmod 0440 /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
+
+  local pkg
+  for pkg in "${aur_pkgs[@]}"; do
+    log "AUR: installing %s" "$pkg"
+    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
+      timeout 600 "$helper" -S --noconfirm --skipreview --needed "$pkg" \
+      || log "warning: AUR package %s failed or timed out (installable later via %s -S %s)" "$pkg" "$helper" "$pkg"
+  done
+
+  run rm -f /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
 }

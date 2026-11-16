@@ -108,6 +108,10 @@ tsukuyomi_pacstrap() {
 
   mapfile -t -O "${#pkgs[@]}" pkgs < <(grep -vE '^[[:space:]]*(#|$)' "$end4_file")
 
+  if [[ -n ${TSUKUYOMI_BROWSER:-} && ${TSUKUYOMI_BROWSER:-none} != none ]]; then
+    pkgs+=("$TSUKUYOMI_BROWSER")
+  fi
+
   local -a unique_pkgs=()
   local -A seen=()
   local p
