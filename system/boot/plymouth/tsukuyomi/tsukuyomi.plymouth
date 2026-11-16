@@ -1,0 +1,11 @@
+[Plymouth Theme]
+Name=Tsukuyomi
+Description=Tsukuyomi OS splash screen.
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/tsukuyomi
+ScriptFile=/usr/share/plymouth/themes/tsukuyomi/tsukuyomi.script
+ConsoleLogBackgroundColor=0x000000
+MonospaceFont=JetBrainsMono Nerd Font 11
+Font=Noto Sans 11
