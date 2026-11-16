@@ -49,7 +49,6 @@ libxcb
 matugen
 mesa
 networkmanager
-otf-space-grotesk
 pavucontrol-qt
 pipewire-pulse
 plasma-nm
@@ -82,8 +81,6 @@ tesseract-data-eng
 tinyxml2
 translate-shell
 ttf-jetbrains-mono-nerd
-ttf-readex-pro
-ttf-rubik-vf
 upower
 uv
 wayland
