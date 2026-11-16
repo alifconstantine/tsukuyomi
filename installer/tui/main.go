@@ -27,8 +27,22 @@ var (
 	cErr     = lipgloss.Color("#E05252")
 )
 
+type browserChoice struct {
+	pkg         string
+	label       string
+	hint        string
+	recommended bool
+}
+
 var (
-	swapChoices   = []int{0, 4, 8}
+	swapChoices = []int{0, 4, 8}
+	browsers    = []browserChoice{
+		{pkg: "brave-bin", label: "Brave", hint: "privacy-first Chromium with adblock · CachyOS repo", recommended: true},
+		{pkg: "firefox", label: "Firefox", hint: "open-source Mozilla browser · extra repo"},
+		{pkg: "zen-browser-bin", label: "Zen Browser", hint: "vertical tabs Firefox fork · CachyOS repo"},
+		{pkg: "chromium", label: "Chromium", hint: "open-source Google Chrome base · extra repo"},
+		{pkg: "none", label: "None", hint: "skip browser installation (install later)"},
+	}
 	installStages = []struct {
 		id    string
 		label string
@@ -37,7 +51,7 @@ var (
 		{"disk", "Partitioning GPT target disk"},
 		{"luks", "Encryption volume setup"},
 		{"filesystems", "Creating Btrfs subvolumes & mounts"},
-		{"pacstrap", "Installing CachyOS & end-4 packages"},
+		{"pacstrap", "Installing CachyOS, end-4 & CLI tools"},
 		{"configure", "Configuring locale, user & mkinitcpio"},
 		{"desktop", "Deploying end-4 shell, fastfetch & SDDM"},
 		{"bootloader", "Installing Limine UKI & Plymouth splash"},
@@ -52,6 +66,7 @@ const (
 	stepLocale   = "locale"
 	stepTimezone = "timezone"
 	stepNetwork  = "network"
+	stepBrowser  = "browser"
 	stepDisk     = "disk"
 	stepIdentity = "identity"
 	stepReview   = "review"
@@ -59,15 +74,19 @@ const (
 	stepDone     = "done"
 )
 
-var stepOrder = []string{
-	stepWelcome,
-	stepLocale,
-	stepTimezone,
-	stepNetwork,
-	stepDisk,
-	stepIdentity,
-	stepReview,
-	stepInstall,
+var stepMeta = []struct {
+	key   string
+	label string
+}{
+	{stepWelcome, "Welcome"},
+	{stepLocale, "Locale"},
+	{stepTimezone, "Timezone"},
+	{stepNetwork, "Network"},
+	{stepBrowser, "Browser"},
+	{stepDisk, "Disk"},
+	{stepIdentity, "Account"},
+	{stepReview, "Review"},
+	{stepInstall, "Install"},
 }
 
 type model struct {
@@ -86,7 +105,7 @@ type model struct {
 	locSearching  bool
 	keymaps       []string
 	keymapIdx     int
-	localePaneKey bool // false=locale list, true=keymap cycle
+	localePaneKey bool
 
 	// Timezone
 	tzAll      []string
@@ -102,6 +121,9 @@ type model struct {
 	wifiPrompt  bool
 	wifiPass    string
 	wifiConnect string
+
+	// Browser
+	browserCursor int
 
 	// Disk & storage
 	disks      []diskInfo
@@ -143,18 +165,19 @@ func initialModel(dryRun bool) model {
 	nets, wifiNote := scanWifi()
 
 	m := model{
-		dryRun:     dryRun,
-		state:      stepWelcome,
-		sys:        probeSystem(),
-		locales:    locs,
-		keymaps:    kms,
-		tzAll:      tzs,
-		wifiNets:   nets,
-		wifiNotice: wifiNote,
-		disks:      disks,
-		snapshots:  true,
-		swapIdx:    1, // 4 GiB default
-		hostname:   "tsukuyomi",
+		dryRun:        dryRun,
+		state:         stepWelcome,
+		sys:           probeSystem(),
+		locales:       locs,
+		keymaps:       kms,
+		tzAll:         tzs,
+		wifiNets:      nets,
+		wifiNotice:    wifiNote,
+		browserCursor: 0, // Brave (Recommended)
+		disks:         disks,
+		snapshots:     true,
+		swapIdx:       1, // 4 GiB default
+		hostname:      "tsukuyomi",
 	}
 	m.applyLocaleFilter()
 	m.applyTzFilter()
@@ -237,6 +260,8 @@ func (m model) onKey(k string) (tea.Model, tea.Cmd) {
 		return m.keyTimezone(k)
 	case stepNetwork:
 		return m.keyNetwork(k)
+	case stepBrowser:
+		return m.keyBrowser(k)
 	case stepDisk:
 		return m.keyDisk(k)
 	case stepIdentity:
@@ -396,6 +421,24 @@ func (m model) keyNetwork(k string) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "enter":
+		m.state = stepBrowser
+	}
+	return m, nil
+}
+
+func (m model) keyBrowser(k string) (tea.Model, tea.Cmd) {
+	switch k {
+	case "esc":
+		m.state = stepNetwork
+	case "up", "k":
+		if m.browserCursor > 0 {
+			m.browserCursor--
+		}
+	case "down", "j":
+		if m.browserCursor < len(browsers)-1 {
+			m.browserCursor++
+		}
+	case "enter":
 		m.state = stepDisk
 	}
 	return m, nil
@@ -404,7 +447,7 @@ func (m model) keyNetwork(k string) (tea.Model, tea.Cmd) {
 func (m model) keyDisk(k string) (tea.Model, tea.Cmd) {
 	switch k {
 	case "esc":
-		m.state = stepNetwork
+		m.state = stepBrowser
 		return m, nil
 	case "tab":
 		m.diskFocus = (m.diskFocus + 1) % 6
@@ -658,6 +701,17 @@ func (m model) selectedTimezone() string {
 	return "Asia/Jakarta"
 }
 
+func (m model) selectedBrowser() browserChoice {
+	if m.browserCursor >= 0 && m.browserCursor < len(browsers) {
+		return browsers[m.browserCursor]
+	}
+	return browsers[0]
+}
+
+func (m model) selectedBrowserPkg() string {
+	return m.selectedBrowser().pkg
+}
+
 func (m model) selectedDiskPath() string {
 	if len(m.disks) > 0 && m.diskCursor < len(m.disks) {
 		return m.disks[m.diskCursor].Path
@@ -698,7 +752,7 @@ func (m model) validateIdentity() error {
 	return nil
 }
 
-// ───────────────────────── rendering ─────────────────────────
+// ───────────────────────── rendering (Ryoku-style sidebar + card) ─────────────────────────
 
 func fg(c color.Color, s string) string {
 	return lipgloss.NewStyle().Foreground(c).Render(s)
@@ -708,25 +762,64 @@ func boldFg(c color.Color, s string) string {
 	return lipgloss.NewStyle().Foreground(c).Bold(true).Render(s)
 }
 
+func truncStr(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	r := []rune(s)
+	for len(r) > 0 && lipgloss.Width(string(r))+1 > w {
+		r = r[:len(r)-1]
+	}
+	return string(r) + "…"
+}
+
+func (m model) activeStepIdx() int {
+	for i, s := range stepMeta {
+		if s.key == m.state || (m.state == stepDone && s.key == stepInstall) {
+			return i
+		}
+	}
+	return 0
+}
+
 func (m model) View() tea.View {
 	w := max(m.w, 80)
 	h := max(m.h, 24)
-	contentW := min(w-4, 92)
 
-	header := m.renderHeader(contentW)
-	rail := m.renderStepRail(contentW)
-	body := m.renderBody(contentW, max(h-12, 10))
-	footer := m.renderFooter(contentW)
+	showRail := w >= 92
+	railW := 24
+	totalW := min(w-4, 108)
+	cardW := totalW
+	if showRail {
+		cardW = totalW - railW - 2
+	}
+	innerH := max(h-10, 14)
 
-	panel := lipgloss.NewStyle().
-		Width(contentW).
+	header := m.renderHeader(totalW)
+	body := m.renderBody(cardW-6, innerH)
+	footer := m.renderFooter(totalW)
+
+	card := lipgloss.NewStyle().
+		Width(cardW).
+		Height(innerH).
 		Background(cSurface).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(cBorder).
 		Padding(1, 2).
 		Render(body)
 
-	screen := lipgloss.JoinVertical(lipgloss.Left, header, rail, "", panel, "", footer)
+	var mainArea string
+	if showRail {
+		rail := m.renderSidebar(railW, innerH)
+		mainArea = lipgloss.JoinHorizontal(lipgloss.Top, rail, "  ", card)
+	} else {
+		mainArea = card
+	}
+
+	screen := lipgloss.JoinVertical(lipgloss.Left, header, "", mainArea, "", footer)
 	placed := lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, screen,
 		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(cBg)))
 
@@ -741,42 +834,57 @@ func (m model) View() tea.View {
 
 func (m model) renderHeader(w int) string {
 	title := boldFg(cCrimson, "月読") + " " + boldFg(cText, "TSUKUYOMI OS") + fg(cMuted, "  ·  INSTALLER")
-	modeTag := ""
+	right := fg(cMuted, fmt.Sprintf("Step %d/%d", m.activeStepIdx()+1, len(stepMeta)))
 	if m.dryRun {
-		modeTag = boldFg(cAmber, "[DRY-RUN]")
+		right = boldFg(cAmber, "[DRY-RUN]") + "  " + right
 	}
-	pad := max(1, w-lipgloss.Width(title)-lipgloss.Width(modeTag))
-	return title + strings.Repeat(" ", pad) + modeTag
+	pad := max(1, w-lipgloss.Width(title)-lipgloss.Width(right))
+	return title + strings.Repeat(" ", pad) + right
 }
 
-func (m model) renderStepRail(w int) string {
-	names := []string{"Welcome", "Locale", "Zone", "Net", "Disk", "Account", "Review", "Install"}
-	active := 0
-	for i, s := range stepOrder {
-		if s == m.state || (m.state == stepDone && s == stepInstall) {
-			active = i
-			break
-		}
-	}
-	var parts []string
-	for i, n := range names {
+func (m model) renderSidebar(railW, innerH int) string {
+	active := m.activeStepIdx()
+	var lines []string
+	lines = append(lines, boldFg(cMuted, "INSTALL STEPS"), "")
+	for i, s := range stepMeta {
 		switch {
-		case i < active:
-			parts = append(parts, fg(cSage, "✓ "+n))
+		case i < active || m.state == stepDone:
+			lines = append(lines, fg(cSage, "✓ ")+fg(cText, s.label))
 		case i == active:
-			parts = append(parts, boldFg(cCrimson, "▸ "+n))
+			lines = append(lines, boldFg(cCrimson, "▸ "+s.label))
 		default:
-			parts = append(parts, fg(cMuted, "· "+n))
+			lines = append(lines, fg(cBorder, "· ")+fg(cMuted, s.label))
 		}
 	}
-	line := strings.Join(parts, fg(cBorder, "  "))
-	if lipgloss.Width(line) > w {
-		return boldFg(cCrimson, fmt.Sprintf("Step %d/%d: %s", active+1, len(names), names[active]))
+
+	lines = append(lines, "", fg(cBorder, strings.Repeat("─", railW-4)), boldFg(cMuted, "SELECTIONS"))
+	summary := []struct {
+		k, v string
+	}{
+		{"Zone", m.selectedTimezone()},
+		{"Browser", m.selectedBrowser().label},
+		{"Disk", m.selectedDiskPath()},
+		{"User", m.username},
 	}
-	return line
+	for _, row := range summary {
+		val := row.v
+		if val == "" {
+			val = "—"
+		}
+		lines = append(lines, fg(cMuted, row.k+": ")+fg(cText, truncStr(val, railW-6-len(row.k))))
+	}
+
+	return lipgloss.NewStyle().
+		Width(railW).
+		Height(innerH).
+		Background(cBg).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(cBorder).
+		Padding(1, 1).
+		Render(strings.Join(lines, "\n"))
 }
 
-func (m model) renderBody(w, maxH int) string {
+func (m model) renderBody(innerW, maxH int) string {
 	var out string
 	switch m.state {
 	case stepWelcome:
@@ -787,6 +895,8 @@ func (m model) renderBody(w, maxH int) string {
 		out = m.viewTimezone(maxH - 4)
 	case stepNetwork:
 		out = m.viewNetwork(maxH - 4)
+	case stepBrowser:
+		out = m.viewBrowser(innerW)
 	case stepDisk:
 		out = m.viewDisk()
 	case stepIdentity:
@@ -806,7 +916,7 @@ func (m model) renderBody(w, maxH int) string {
 
 func (m model) viewWelcome() string {
 	lines := []string{
-		boldFg(cText, "Tsukuyomi OS Guided Installer"),
+		boldFg(cCrimson, "Tsukuyomi OS Guided Installer"),
 		fg(cMuted, "CachyOS base · Limine UKI · Plymouth · SDDM · Hyprland (end-4)"),
 		"",
 		kv("Firmware", m.sys.Firmware),
@@ -814,7 +924,12 @@ func (m model) viewWelcome() string {
 		kv("Memory", m.sys.Memory),
 		kv("Network", m.sys.Network),
 		"",
-		fg(cMuted, "Press Enter to configure keyboard, timezone, disk, and user account."),
+		fg(cText, "Included stack:"),
+		fg(cMuted, "  • Kernel & Repos : CachyOS (linux-cachyos) + yay + paru"),
+		fg(cMuted, "  • Desktop Shell  : Hyprland + end-4 Quickshell + lockscreen"),
+		fg(cMuted, "  • CLI Toolkit    : htop, btop, neovim, ripgrep, fd, bat, eza, fzf, zoxide"),
+		"",
+		boldFg(cText, "Press Enter to begin installation."),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -824,13 +939,13 @@ func (m model) viewLocale(listH int) string {
 	if m.locSearching {
 		searchNote = boldFg(cCrimson, "Filter (/): ") + boldFg(cText, m.locSearch+"_")
 	}
-	list := renderSelectableList(m.locFiltered, m.locCursor, max(listH-4, 5))
+	list := renderSelectableList(m.locFiltered, m.locCursor, max(listH-5, 5))
 	kmLine := fmt.Sprintf("Console Keymap (Tab): %s", boldFg(cCrimson, "< "+m.selectedKeymap()+" >"))
 	if m.localePaneKey {
 		kmLine = boldFg(cText, "▸ ") + kmLine
 	}
 	return strings.Join([]string{
-		boldFg(cText, "Locale & Keyboard Layout"),
+		boldFg(cCrimson, "Locale & Keyboard Layout"),
 		searchNote,
 		"",
 		list,
@@ -844,9 +959,9 @@ func (m model) viewTimezone(listH int) string {
 	if m.tzSearchOn {
 		searchNote = boldFg(cCrimson, "Filter (/): ") + boldFg(cText, m.tzSearch+"_")
 	}
-	list := renderSelectableList(m.tzFiltered, m.tzCursor, max(listH-3, 6))
+	list := renderSelectableList(m.tzFiltered, m.tzCursor, max(listH-4, 6))
 	return strings.Join([]string{
-		boldFg(cText, "System Timezone"),
+		boldFg(cCrimson, "System Timezone"),
 		searchNote,
 		"",
 		list,
@@ -856,7 +971,7 @@ func (m model) viewTimezone(listH int) string {
 func (m model) viewNetwork(listH int) string {
 	if m.wifiPrompt {
 		return strings.Join([]string{
-			boldFg(cText, "Connect to Wi-Fi: "+m.wifiConnect),
+			boldFg(cCrimson, "Connect to Wi-Fi: "+m.wifiConnect),
 			"",
 			fmt.Sprintf("Passphrase: %s", boldFg(cText, strings.Repeat("•", len([]rune(m.wifiPass)))+"_")),
 			"",
@@ -876,20 +991,41 @@ func (m model) viewNetwork(listH int) string {
 		content = fg(cMuted, m.wifiNotice)
 	}
 	if len(rows) > 0 {
-		content = renderSelectableList(rows, m.wifiCursor, max(listH-4, 5))
+		content = renderSelectableList(rows, m.wifiCursor, max(listH-5, 5))
 	}
 	return strings.Join([]string{
-		boldFg(cText, "Network Status: "+m.sys.Network),
+		boldFg(cCrimson, "Network Status: "+m.sys.Network),
 		fg(cMuted, "Press 'c' to connect selected Wi-Fi, 'r' to rescan, or Enter to continue."),
 		"",
 		content,
 	}, "\n")
 }
 
+func (m model) viewBrowser(innerW int) string {
+	lines := []string{
+		boldFg(cCrimson, "Web Browser"),
+		fg(cMuted, "Select the default browser to install and configure for your desktop:"),
+		"",
+	}
+	for i, b := range browsers {
+		tag := ""
+		if b.recommended {
+			tag = boldFg(cSage, " [Recommended]")
+		}
+		if i == m.browserCursor {
+			lines = append(lines, boldFg(cCrimson, "▸ "+b.label)+tag)
+		} else {
+			lines = append(lines, fg(cText, "  "+b.label)+tag)
+		}
+		lines = append(lines, fg(cMuted, "    "+truncStr(b.hint, max(innerW-6, 20))))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m model) viewDisk() string {
 	var diskRows []string
 	for _, d := range m.disks {
-		diskRows = append(diskRows, fmt.Sprintf("%-14s %-8s %-28s (%s)", d.Path, d.Size, d.Model, d.Tran))
+		diskRows = append(diskRows, fmt.Sprintf("%-14s %-8s %-24s (%s)", d.Path, d.Size, d.Model, d.Tran))
 	}
 	diskList := fg(cErr, "No target disk detected")
 	if len(diskRows) > 0 {
@@ -906,8 +1042,8 @@ func (m model) viewDisk() string {
 	}
 
 	lines := []string{
-		boldFg(cText, "Target Disk & Storage Layout (GPT + Limine ESP + Btrfs)"),
-		fg(cMuted, "Tab moves fields · Space toggles · Ctrl+N or Enter on final row continues"),
+		boldFg(cCrimson, "Target Disk & Storage Layout"),
+		fg(cMuted, "GPT (1G Limine ESP + Btrfs) · Tab moves fields · Space toggles"),
 		"",
 		focusLabel(m.diskFocus == 0, "Target Disk:"),
 		diskList,
@@ -929,7 +1065,7 @@ func (m model) viewDisk() string {
 
 func (m model) viewIdentity() string {
 	lines := []string{
-		boldFg(cText, "System Identity & Primary Administrator"),
+		boldFg(cCrimson, "System Identity & Primary Administrator"),
 		fg(cMuted, "Password is hashed in-process with SHA-512 crypt ($6$)."),
 		"",
 		focusLabel(m.idFocus == 0, fmt.Sprintf("Hostname  : %s", plainInput(m.hostname, m.idFocus == 0))),
@@ -951,10 +1087,11 @@ func (m model) viewReview() string {
 		snapStr = "Enabled (Snapper + Limine)"
 	}
 	lines := []string{
-		boldFg(cText, "Review Installation Plan"),
+		boldFg(cCrimson, "Review Installation Plan"),
 		"",
 		kv("Locale / Keymap", fmt.Sprintf("%s · %s", m.selectedLocale(), m.selectedKeymap())),
 		kv("Timezone", m.selectedTimezone()),
+		kv("Web Browser", m.selectedBrowser().label+" ("+m.selectedBrowserPkg()+")"),
 		kv("Target Disk", m.selectedDiskPath()+" (GPT: 1G Limine ESP + Btrfs)"),
 		kv("Encryption", encStr),
 		kv("Snapshots / Swap", fmt.Sprintf("%s · %d GiB swapfile", snapStr, swapChoices[m.swapIdx])),
@@ -1022,6 +1159,8 @@ func (m model) renderFooter(w int) string {
 		hint = "↑/↓ move · / filter · tab switch · enter next · esc back"
 	case stepNetwork:
 		hint = "↑/↓ select · c connect · r rescan · enter next · esc back"
+	case stepBrowser:
+		hint = "↑/↓ choose browser · enter next · esc back"
 	case stepDisk:
 		hint = "tab field · space toggle · ctrl+n next · esc back"
 	case stepIdentity:

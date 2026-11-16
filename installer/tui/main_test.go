@@ -30,10 +30,30 @@ func TestDryRunWizardTransition(t *testing.T) {
 	if m.state != stepWelcome {
 		t.Fatalf("expected initial state welcome, got %s", m.state)
 	}
-	next, _ := m.onKey("enter")
+	if m.selectedBrowserPkg() != "brave-bin" {
+		t.Fatalf("expected default recommended browser brave-bin, got %s", m.selectedBrowserPkg())
+	}
+	next, _ := m.onKey("enter") // -> locale
+	next, _ = next.(model).onKey("enter") // -> timezone
+	next, _ = next.(model).onKey("enter") // -> network
+	next, _ = next.(model).onKey("enter") // -> browser
 	nm := next.(model)
-	if nm.state != stepLocale {
-		t.Fatalf("expected state locale after enter, got %s", nm.state)
+	if nm.state != stepBrowser {
+		t.Fatalf("expected state browser after network, got %s", nm.state)
+	}
+	next, _ = nm.onKey("enter") // -> disk
+	if next.(model).state != stepDisk {
+		t.Fatalf("expected state disk after browser, got %s", next.(model).state)
+	}
+}
+
+func TestDryRunSidebarRender(t *testing.T) {
+	m := initialModel(true)
+	m.w = 110
+	m.h = 34
+	v := m.View()
+	if !strings.Contains(v.Content, "INSTALL STEPS") || !strings.Contains(v.Content, "Browser") {
+		t.Fatalf("expected sidebar with INSTALL STEPS and Browser in view")
 	}
 }
 
@@ -55,7 +75,7 @@ func TestDryRunBackendScript(t *testing.T) {
 		t.Fatalf("dry-run backend failed: %v\n%s", err, string(out))
 	}
 	s := string(out)
-	if !strings.Contains(s, "@@TSUKUYOMI_DONE") {
-		t.Fatalf("expected @@TSUKUYOMI_DONE in backend output, got:\n%s", s)
+	if !strings.Contains(s, "@@TSUKUYOMI_DONE") || !strings.Contains(s, "brave-bin") {
+		t.Fatalf("expected @@TSUKUYOMI_DONE and brave-bin in backend output, got:\n%s", s)
 	}
 }

@@ -351,6 +351,7 @@ func buildInstallEnv(m model) []string {
 		"TSUKUYOMI_LOCALE":           m.selectedLocale(),
 		"TSUKUYOMI_KEYMAP":           m.selectedKeymap(),
 		"TSUKUYOMI_TIMEZONE":         m.selectedTimezone(),
+		"TSUKUYOMI_BROWSER":          m.selectedBrowserPkg(),
 		"TSUKUYOMI_HOSTNAME":         strings.TrimSpace(m.hostname),
 		"TSUKUYOMI_USERNAME":         strings.TrimSpace(m.username),
 		"TSUKUYOMI_FULLNAME":         strings.TrimSpace(m.fullname),
