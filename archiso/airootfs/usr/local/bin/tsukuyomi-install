@@ -1,1 +1,2 @@
-/usr/local/lib/tsukuyomi/backend/tsukuyomi-install
+#!/usr/bin/env bash
+exec /usr/local/lib/tsukuyomi/backend/tsukuyomi-install "$@"
