@@ -13,6 +13,7 @@ Singleton {
     property string firstRunNotifBody: "Hit Super+/ for a list of keybinds"
     property string defaultWallpaperPath: FileUtils.trimFileProtocol(`${Directories.assetsPath}/images/default_wallpaper.png`)
     property string welcomeQmlPath: FileUtils.trimFileProtocol(Quickshell.shellPath("welcome.qml"))
+    property bool pendingFirstRun: false
 
     function load() {
         firstRunFileView.reload()
@@ -26,8 +27,28 @@ Singleton {
     }
 
     function handleFirstRun() {
-        Quickshell.execDetached([Directories.wallpaperSwitchScriptPath, root.defaultWallpaperPath])
+        const targetWall = Config.options.background.wallpaperPath.length > 0
+            ? Config.options.background.wallpaperPath
+            : root.defaultWallpaperPath
+        if (Config.options.background.wallpaperPath.length === 0) {
+            Config.options.background.wallpaperPath = targetWall
+        }
+        Quickshell.execDetached([Directories.wallpaperSwitchScriptPath, targetWall])
         Quickshell.execDetached(["bash", "-c", `qs -p '${root.welcomeQmlPath}'`])
+    }
+
+    function maybeTriggerFirstRun() {
+        if (!root.pendingFirstRun || !Config.ready) return;
+        root.pendingFirstRun = false;
+        firstRunFileView.setText(root.firstRunFileContent);
+        root.handleFirstRun();
+    }
+
+    Connections {
+        target: Config
+        function onReadyChanged() {
+            root.maybeTriggerFirstRun();
+        }
     }
 
     FileView {
@@ -35,8 +56,8 @@ Singleton {
         path: Qt.resolvedUrl(firstRunFilePath)
         onLoadFailed: (error) => {
             if (error == FileViewError.FileNotFound) {
-                firstRunFileView.setText(root.firstRunFileContent)
-                root.handleFirstRun()
+                root.pendingFirstRun = true;
+                root.maybeTriggerFirstRun();
             }
         }
     }

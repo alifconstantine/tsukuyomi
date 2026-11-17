@@ -93,29 +93,43 @@ EOF
     run chmod 0600 /mnt/etc/NetworkManager/system-connections/*.nmconnection
   fi
 
-  # Temporary DNS inside chroot so uv and AUR helpers can resolve hosts
+  # Temporary DNS inside chroot so uv, font fallback, and AUR helpers can resolve hosts
   local made_resolv=0
+  local saved_resolv_link=""
   if [[ -z ${TSUKUYOMI_DRYRUN:-} && ! -e /mnt/etc/resolv.conf && -e /etc/resolv.conf ]]; then
-    cp -L /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null && made_resolv=1 || true
+    if [[ -L /mnt/etc/resolv.conf ]]; then
+      saved_resolv_link=$(readlink /mnt/etc/resolv.conf 2>/dev/null || true)
+    fi
+    cp -L --remove-destination /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null && made_resolv=1 || true
   fi
 
-  # Install local [tsukuyomi-local] AUR repo packages if staged, else per-package paru/yay
+  # Install local [tsukuyomi-local] AUR repo packages if staged, else staged PKGBUILDs + paru/yay
   tsukuyomi_install_aur_layer "$user"
+
+  # Guarantee Google Sans Flex is installed even if AUR/local repo skipped it
+  tsukuyomi_ensure_google_sans_flex
 
   # Prepare end-4 Python venv if online (non-fatal if offline)
   if [[ -f "$TSUKUYOMI_SHARE/shell/requirements.txt" ]] && chroot_has uv; then
     log "setting up end-4 Quickshell Python environment (.venv)"
-    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" bash -c \
+    run arch-chroot /mnt runuser -u "$user" -- env \
+      "HOME=/home/$user" "USER=$user" "LOGNAME=$user" "UV_LINK_MODE=copy" bash -c \
       "mkdir -p ~/.local/state/quickshell && uv venv --prompt .venv ~/.local/state/quickshell/.venv -p 3.12 && uv pip install --python ~/.local/state/quickshell/.venv/bin/python -r /usr/share/tsukuyomi/shell/requirements.txt" \
       || log "warning: uv Python venv setup skipped or offline; run 'uv pip install' on first boot if needed"
   fi
 
   if (( made_resolv == 1 )); then
     rm -f /mnt/etc/resolv.conf 2>/dev/null || true
+    if [[ -n $saved_resolv_link ]]; then
+      ln -s "$saved_resolv_link" /mnt/etc/resolv.conf 2>/dev/null || true
+    fi
   fi
 
   # Refresh font cache so newly installed icon/UI fonts are immediately discovered
   run arch-chroot /mnt fc-cache -f || true
+
+  # Seed end-4 user directories, dark-mode gsettings, and initial wallpaper/Material You palette
+  tsukuyomi_seed_end4_defaults "$user"
 
   # Point default web browser if one was selected
   tsukuyomi_set_default_browser "$user"
@@ -164,6 +178,106 @@ EOF
   fi
 }
 
+tsukuyomi_ensure_google_sans_flex() {
+  if [[ -z ${TSUKUYOMI_DRYRUN:-} ]] && [[ -d /mnt/usr/share/fonts ]] && find /mnt/usr/share/fonts -iname '*GoogleSansFlex*' 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if [[ -n ${TSUKUYOMI_DRYRUN:-} ]]; then
+    log "(dry-run) ensuring Google Sans Flex font is installed in /usr/share/fonts/google-sans-flex"
+    return 0
+  fi
+  if chroot_has git; then
+    log "fetching Google Sans Flex variable font (end-4/google-sans-flex)"
+    run arch-chroot /mnt bash -c \
+      'rm -rf /usr/share/fonts/google-sans-flex && git clone --depth=1 https://github.com/end-4/google-sans-flex /usr/share/fonts/google-sans-flex && rm -rf /usr/share/fonts/google-sans-flex/.git' \
+      || log "warning: could not fetch Google Sans Flex font offline; install ttf-google-sans-flex later"
+  fi
+}
+
+tsukuyomi_seed_end4_defaults() {
+  local user=$1
+
+  if chroot_has xdg-user-dirs-update; then
+    log "creating XDG user directories for %s" "$user"
+    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
+      xdg-user-dirs-update || true
+  fi
+
+  if chroot_has gsettings && chroot_has dbus-run-session; then
+    log "applying end-4 GTK/GNOME dark theme and font defaults"
+    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
+      dbus-run-session -- bash -c "
+        gsettings set org.gnome.desktop.interface font-name 'Google Sans Flex Medium 11 @opsz=11,wght=500'
+        gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
+        gsettings set org.gnome.desktop.interface gtk-theme 'adw-gtk3-dark'
+      " || log "warning: gsettings default setup skipped"
+  fi
+
+  local init_wall="/home/$user/Pictures/Wallpapers/default_wallpaper.png"
+  if [[ -z ${TSUKUYOMI_DRYRUN:-} && ! -f "/mnt$init_wall" ]]; then
+    init_wall="/home/$user/.config/quickshell/ii/assets/images/default_wallpaper.png"
+  fi
+
+  if [[ -n ${TSUKUYOMI_DRYRUN:-} || -f "/mnt$init_wall" ]]; then
+    log "seeding initial end-4 wallpaper config and Material You palette"
+    run arch-chroot /mnt runuser -u "$user" -- env \
+      "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
+      "XDG_CONFIG_HOME=/home/$user/.config" \
+      "XDG_CACHE_HOME=/home/$user/.cache" \
+      "XDG_STATE_HOME=/home/$user/.local/state" \
+      "ILLOGICAL_IMPULSE_VIRTUAL_ENV=/home/$user/.local/state/quickshell/.venv" \
+      bash -c '
+        wall="$1"
+        cfg_dir="$HOME/.config/illogical-impulse"
+        state_gen="$HOME/.local/state/quickshell/user/generated"
+        script_dir="$HOME/.config/quickshell/ii/scripts/colors"
+        mkdir -p "$cfg_dir" "$state_gen/wallpaper"
+        if [[ ! -s "$cfg_dir/config.json" ]] && command -v jq >/dev/null 2>&1; then
+          jq -n --arg p "$wall" "{background: {wallpaperPath: \$p}}" > "$cfg_dir/config.json"
+        fi
+        if command -v matugen >/dev/null 2>&1; then
+          matugen --source-color-index 0 image "$wall" --mode dark --type scheme-tonal-spot >/dev/null 2>&1 || true
+        fi
+        if [[ -f "$HOME/.local/state/quickshell/.venv/bin/activate" && -f "$script_dir/generate_colors_material.py" ]]; then
+          # shellcheck disable=SC1091
+          source "$HOME/.local/state/quickshell/.venv/bin/activate"
+          python3 "$script_dir/generate_colors_material.py" \
+            --path "$wall" --mode dark --scheme scheme-tonal-spot \
+            --termscheme "$script_dir/terminal/scheme-base.json" --blend_bg_fg \
+            --harmony 0.6 --harmonize_threshold 100 --term_fg_boost 0.35 \
+            --cache "$state_gen/color.txt" > "$state_gen/material_colors.scss" 2>/dev/null || true
+          deactivate
+          [[ -x "$script_dir/applycolor.sh" ]] && "$script_dir/applycolor.sh" >/dev/null 2>&1 || true
+        fi
+      ' _ "$init_wall" || log "warning: initial Material You theme generation skipped"
+  fi
+}
+
+tsukuyomi_install_staged_pkgbuilds() {
+  local user=$1
+  local pkgbuild_dir name work
+  local -a staged_dirs=(
+    "$TSUKUYOMI_SHARE/packages/pkgbuilds/ttf-google-sans-flex"
+    "$TSUKUYOMI_SHARE/shell/dist-arch/illogical-impulse-bibata-modern-classic-bin"
+    "$TSUKUYOMI_SHARE/shell/dist-arch/illogical-impulse-microtex-git"
+  )
+
+  for pkgbuild_dir in "${staged_dirs[@]}"; do
+    [[ -f "$pkgbuild_dir/PKGBUILD" ]] || continue
+    name=$(basename "$pkgbuild_dir")
+    log "PKGBUILD: building & installing %s" "$name"
+    work="/tmp/tsukuyomi-pkg-$name"
+    run rm -rf "/mnt$work"
+    run mkdir -p "/mnt$work"
+    run cp -a "$pkgbuild_dir/." "/mnt$work/"
+    run arch-chroot /mnt chown -R "$user:$user" "$work"
+    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
+      bash -c "cd '$work' && timeout 600 makepkg -Afsi --noconfirm --needed" \
+      || log "warning: local PKGBUILD %s failed or timed out" "$name"
+    run rm -rf "/mnt$work"
+  done
+}
+
 tsukuyomi_install_aur_layer() {
   local user=$1
   local aur_file="$TSUKUYOMI_SHARE/packages/end4-aur.packages"
@@ -184,9 +298,16 @@ tsukuyomi_install_aur_layer() {
   fi
 
   [[ ${TSUKUYOMI_INSTALL_AUR:-1} == 1 && -f $aur_file ]] || return 0
+
+  write_file /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp <<EOF
+$user ALL=(ALL:ALL) NOPASSWD: ALL
+EOF
+  run chmod 0440 /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
+
+  tsukuyomi_install_staged_pkgbuilds "$user"
+
   local -a aur_pkgs=()
-  mapfile -t aur_pkgs < <(grep -vE '^[[:space:]]*(#|$|illogical-impulse-)' "$aur_file" || true)
-  (( ${#aur_pkgs[@]} > 0 )) || return 0
+  mapfile -t aur_pkgs < <(grep -vE '^[[:space:]]*(#|$|illogical-impulse-|ttf-google-sans-flex$)' "$aur_file" || true)
 
   local helper=""
   if chroot_has paru; then
@@ -194,21 +315,17 @@ tsukuyomi_install_aur_layer() {
   elif chroot_has yay; then
     helper="yay"
   fi
-  [[ -n $helper ]] || return 0
 
-  log "installing %d end-4 AUR package(s) via %s (one-by-one)" "${#aur_pkgs[@]}" "$helper"
-  write_file /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp <<EOF
-$user ALL=(ALL:ALL) NOPASSWD: ALL
-EOF
-  run chmod 0440 /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
-
-  local pkg
-  for pkg in "${aur_pkgs[@]}"; do
-    log "AUR: installing %s" "$pkg"
-    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
-      timeout 600 "$helper" -S --noconfirm --skipreview --needed "$pkg" \
-      || log "warning: AUR package %s failed or timed out (installable later via %s -S %s)" "$pkg" "$helper" "$pkg"
-  done
+  if (( ${#aur_pkgs[@]} > 0 )) && [[ -n $helper ]]; then
+    log "installing %d end-4 AUR package(s) via %s (one-by-one)" "${#aur_pkgs[@]}" "$helper"
+    local pkg
+    for pkg in "${aur_pkgs[@]}"; do
+      log "AUR: installing %s" "$pkg"
+      run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
+        timeout 600 "$helper" -S --noconfirm --skipreview --needed "$pkg" \
+        || log "warning: AUR package %s failed or timed out (installable later via %s -S %s)" "$pkg" "$helper" "$pkg"
+    done
+  fi
 
   run rm -f /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
 }
