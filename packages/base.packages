@@ -19,6 +19,8 @@ snap-pac
 efibootmgr
 plymouth
 sddm
+weston
+libdrm
 fastfetch
 networkmanager
 iwd

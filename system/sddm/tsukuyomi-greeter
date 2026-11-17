@@ -1,0 +1,465 @@
+#!/usr/bin/env bash
+#
+# tsukuyomi-greeter: the SDDM Wayland greeter compositor.
+#
+# Runs `weston --shell=kiosk` at each connected output's top mode (native
+# resolution, highest refresh) so the login screen matches a high-refresh
+# session instead of the EDID-preferred rate (often 60Hz). This is the Wayland
+# equivalent of the xrandr-in-Xsetup hack, without touching a stock SDDM file or
+# fighting Hyprland's own mode selection.
+#
+# modetest (libdrm) reads each connector's modes without holding DRM master, so
+# it runs before weston takes the card. Any uncertainty -- no modetest, nothing
+# connected, an empty parse -- falls back to plain weston (preferred mode), so
+# the greeter always comes up. weston itself ignores an unmatched output mode
+# and keeps the preferred one, so a wrong pick degrades to today's behaviour
+# rather than a blank login screen.
+#
+# Which monitor the login form lands on: with two displays weston's kiosk shell
+# drops the greeter on whichever output came up first (a DP that trains a beat
+# before an HDMI), which is often the wrong one. kiosk-shell can pin a client to
+# a named output by its Wayland app-id, so the greeter (sddm-greeter-qt6) is
+# pinned to a chosen output: an internal laptop panel when there is one, or the
+# connector named in /etc/tsukuyomi/greeter.conf (PRIMARY=<name>, APPID=<id>) or
+# TSUKUYOMI_GREETER_PRIMARY / TSUKUYOMI_GREETER_APPID. Idle blanking is off so a display
+# never powers down at the login screen.
+set -u
+
+# The login pointer is the greeter client's own cursor: Qt pushes a themed
+# cursor surface and weston's kiosk shell has no cursor of its own. Pin the
+# shipped Bibata set (ryoku-cursors) so that surface renders from a real
+# theme. Matches GreeterEnvironment in /etc/sddm.conf.d/10-ryoku-wayland.conf.
+export XCURSOR_THEME="${XCURSOR_THEME:-Bibata-Modern-Classic}"
+export XCURSOR_SIZE="${XCURSOR_SIZE:-24}"
+
+# Pick the card that can actually show the greeter before weston applies its
+# boot-VGA heuristic. Auxiliary KMS devices such as appletbdrm can have a
+# connected output without a render node, while a mux can leave one GPU's panel
+# connector disconnected. Prefer a render-capable card that owns the live
+# internal panel, then any live render card. KMS-only cards remain a last resort
+# for simple virtual machines.
+drm_root="${TSUKUYOMI_GREETER_DRM_ROOT:-/sys/class/drm}"
+
+card_has_render() {
+  local card="$1" node
+  for node in "$card/device/drm"/renderD*; do
+    [ -e "$node" ] && return 0
+  done
+  return 1
+}
+
+card_has_connected() {
+  local card_name="$1" internal_only="$2" conn name
+  for conn in "$drm_root/${card_name}-"*; do
+    [ -r "$conn/status" ] && [ "$(cat "$conn/status")" = connected ] || continue
+    name=${conn##*/}
+    name=${name#"$card_name"-}
+    if [ "$internal_only" = 0 ]; then
+      return 0
+    fi
+    case "$name" in
+      eDP-* | LVDS-* | DSI-*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+card_connected_names() {
+  local card_name="$1" conn name
+  for conn in "$drm_root/${card_name}-"*; do
+    [ -r "$conn/status" ] && [ "$(cat "$conn/status")" = connected ] || continue
+    name=${conn##*/}
+    printf '%s ' "${name#"$card_name"-}"
+  done
+}
+
+select_drm_card() {
+  local card card_name number class boot
+  for card in "$drm_root"/card[0-9]*; do
+    [ -d "$card" ] || continue
+    card_name=${card##*/}
+    [[ "$card_name" =~ ^card([0-9]+)$ ]] || continue
+    card_has_connected "$card_name" 0 || continue
+    number=${BASH_REMATCH[1]}
+    if card_has_render "$card"; then
+      if card_has_connected "$card_name" 1; then
+        class=1
+      else
+        class=2
+      fi
+    else
+      class=3
+    fi
+    boot=1
+    [ "$(cat "$card/device/boot_vga" 2>/dev/null)" = 1 ] && boot=0
+    printf '%s %s %s %s\n' "$class" "$boot" "$number" "$card_name"
+  done | sort -k1,1n -k2,2n -k3,3n | awk 'NR == 1 { print $4 }'
+}
+
+# Chosen fresh for every weston start: the usable card can change while the
+# greeter is coming up (a driver binding after the firmware framebuffer, a mux
+# settling), so a retry must not inherit the first attempt's pick.
+pick_weston_args() {
+  selected_card="$(select_drm_card)"
+  weston_args=()
+  if [ -n "$selected_card" ]; then
+    selected_path="$drm_root/$selected_card"
+    weston_args+=("--drm-device=$selected_card")
+    if ! card_has_render "$selected_path"; then
+      weston_args+=("--renderer=pixman")
+    elif card_has_connected "$selected_card" 1 &&
+      [ "$(cat "$selected_path/device/vendor" 2>/dev/null)" = "0x10de" ]; then
+      # NVIDIA's cursor plane accepts the login pointer but does not display it.
+      weston_args+=("--renderer=pixman")
+    fi
+  else
+    echo "tsukuyomi-greeter: no connected DRM card found; using weston's default" >&2
+  fi
+}
+selected_card=""
+selected_path=""
+weston_args=()
+
+# weston reads no X11 keyboard config, so without one the greeter comes up on
+# weston's built-in us map and a non-us password fails at the login field. Read
+# the layout the system records and hand it to weston through the libxkbcommon
+# defaults, which weston honours when its own config names no keymap.
+#
+# /etc/X11/xorg.conf.d/00-keyboard.conf is the richest source (layout, variant,
+# options) but localectl only writes it when a layout is applied system-wide;
+# many installs set only /etc/vconsole.conf. So fall back to the console keymap
+# -- the layout the box was installed with -- converting the console-keymap names
+# that differ from their xkb code (de-latin1 -> de, uk -> gb) so a de box shows
+# de at the login field even when the X11 file was never written (#224). Mirrors
+# consoleToXkb in ryoku/cli/internal/keyboard/keyboard.go.
+console_to_xkb() {
+  case "$1" in
+    uk | gb) printf '%s' gb ;;
+    fr-latin1 | fr-pc | azerty) printf '%s' fr ;;
+    be-latin1) printf '%s' be ;;
+    de-latin1) printf '%s' de ;;
+    de_CH-latin1 | sg | sf) printf '%s' ch ;;
+    es-cp850) printf '%s' es ;;
+    la-latin1) printf '%s' latam ;;
+    it2) printf '%s' it ;;
+    pt-latin1) printf '%s' pt ;;
+    br-abnt2) printf '%s' br ;;
+    no-latin1 | nb) printf '%s' no ;;
+    fi-latin1) printf '%s' 'fi' ;;
+    se-latin1) printf '%s' se ;;
+    dk-latin1) printf '%s' dk ;;
+    is-latin1) printf '%s' is ;;
+    pl2) printf '%s' pl ;;
+    cz-lat2) printf '%s' cz ;;
+    sk-qwertz) printf '%s' sk ;;
+    hu101) printf '%s' hu ;;
+    jp106) printf '%s' jp ;;
+    croat) printf '%s' hr ;;
+    slovene) printf '%s' si ;;
+    trq | trf) printf '%s' tr ;;
+    ua-utf) printf '%s' ua ;;
+    ruwin_alt-UTF-8) printf '%s' ru ;;
+    us-acentos | dvorak | colemak) printf '%s' us ;;
+    "") : ;;
+    *[-_]*) base=${1%%[-_]*}; [ "${#base}" -le 3 ] && printf '%s' "$base" ;;
+    *) [ "${#1}" -le 3 ] && printf '%s' "$1" ;;
+  esac
+}
+
+layout=""
+variant=""
+options=""
+kb_conf=/etc/X11/xorg.conf.d/00-keyboard.conf
+if [ -r "$kb_conf" ]; then
+  xkb_opt() { sed -n "s/.*Option[[:space:]]*\"$1\"[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$kb_conf" | head -n1; }
+  layout=$(xkb_opt XkbLayout); layout=${layout%%,*}
+  if [ -n "$layout" ]; then
+    variant=$(xkb_opt XkbVariant); variant=${variant%%,*}
+    options=$(xkb_opt XkbOptions)
+  fi
+fi
+if [ -z "$layout" ] && [ -r /etc/vconsole.conf ]; then
+  keymap=$(sed -n 's/^[[:space:]]*KEYMAP[[:space:]]*=[[:space:]]*//p' /etc/vconsole.conf | tail -n1)
+  keymap=${keymap%\"}; keymap=${keymap#\"}
+  layout=$(console_to_xkb "$keymap")
+fi
+if [ -n "$layout" ]; then
+  export XKB_DEFAULT_LAYOUT="$layout"
+  [ -n "$variant" ] && export XKB_DEFAULT_VARIANT="$variant"
+  [ -n "$options" ] && export XKB_DEFAULT_OPTIONS="$options"
+fi
+
+# Operator config for where the login form lands. env wins over the file; the
+# file is /etc/tsukuyomi/greeter.conf with plain KEY=value lines (PRIMARY, APPID).
+# greeter_appid is the Wayland app-id kiosk-shell matches: the Qt6 greeter sets
+# none, so Qt uses the binary name, sddm-greeter-qt6.
+greeter_conf="${TSUKUYOMI_GREETER_CONF:-/etc/tsukuyomi/greeter.conf}"
+conf_val() { [ -r "$greeter_conf" ] && sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$greeter_conf" | tail -n1; }
+# The session's chosen main display, published by the Hub's Displays apply.
+# /etc/tsukuyomi/greeter.conf is root-owned and manual, so it can never follow the
+# user's pick; this file is how the pick reaches the greeter, which runs as the
+# unprivileged sddm user and cannot read a per-user home.
+greeter_primary_file="${TSUKUYOMI_GREETER_PRIMARY_FILE:-/var/lib/tsukuyomi/greeter-primary}"
+# The session's numlock choice, published by the compositor provider on every
+# apply. Same reason as greeter-primary: the greeter runs as sddm and cannot
+# read a per-user desktop.json, so without this hand-off the keypad is forced
+# on for everyone and the LED state carries into the session's lock screen.
+greeter_numlock_file="${TSUKUYOMI_GREETER_NUMLOCK_FILE:-/var/lib/tsukuyomi/greeter-numlock}"
+greeter_primary="${TSUKUYOMI_GREETER_PRIMARY:-$(conf_val PRIMARY)}"
+greeter_appid="${TSUKUYOMI_GREETER_APPID:-$(conf_val APPID)}"
+greeter_appid="${greeter_appid:-sddm-greeter-qt6}"
+
+# Resolve which connector the login form is pinned to. An explicit PRIMARY (env
+# or operator file) wins when it is actually connected; then the connector the
+# session's Displays apply recorded as main; then an internal laptop panel
+# (eDP/LVDS/DSI) as the sensible default. With none of them, print nothing:
+# weston keeps its own choice and only the mode tuning applies, exactly as
+# before. Every candidate is validated against the connected set, so a stale
+# hand-off (a docked external that is gone) degrades to the old behaviour
+# instead of a blank login.
+choose_primary() {
+  local want="$1" names handoff
+  names="$(printf '%s\n' "$modes" | awk 'NF { print $1 }')"
+  if [ -n "$want" ] && printf '%s\n' "$names" | grep -qxF "$want"; then
+    printf '%s' "$want"; return
+  fi
+  if [ -r "$greeter_primary_file" ]; then
+    handoff="$(tr -d '[:space:]' < "$greeter_primary_file")"
+    if [ -n "$handoff" ] && printf '%s\n' "$names" | grep -qxF "$handoff"; then
+      printf '%s' "$handoff"; return
+    fi
+  fi
+  printf '%s\n' "$names" | grep -m1 -E '^(eDP|LVDS|DSI)' || true
+}
+
+# The kiosk shell draws no pointer of its own for a cursor-shape client, and
+# weston only learns which theme to draw from a [shell] block, so every config we
+# hand it carries one; without it the login pointer never renders (issue #191).
+shell_ini() { printf '[shell]\ncursor-theme=%s\ncursor-size=%s\n\n' "${XCURSOR_THEME:-Bibata-Modern-Classic}" "${XCURSOR_SIZE:-24}"; }
+
+# The keypad should type digits at the login field for users who want it:
+# SDDM's [General] Numlock knob is inert under the Wayland greeter (its keyboard
+# backend's sendChanges() is empty), and the skin's keyboard.numLock assignment
+# reaches the same dead end, so weston's own lock key is the only channel that
+# lands. But forcing it on is wrong for a compact laptop whose numlock overlay
+# turns letter keys into digits, and the LED state carries into the session and
+# its lock screen, so the session's published choice wins when there is one;
+# with no hand-off yet (fresh install, PIN login) the keypad stays a keypad.
+keyboard_ini() {
+  local on=true
+  if [ -r "$greeter_numlock_file" ]; then
+    case "$(tr -d '[:space:]' <"$greeter_numlock_file")" in
+      off) on=false ;;
+      *) on=true ;;
+    esac
+  fi
+  printf '[keyboard]\nnumlock-on=%s\n\n' "$on"
+}
+
+# Match the session's touchpad feel: Hyprland enables tap-to-click by default,
+# weston does not (enable-tap defaults off), so a clickpad that taps to click in
+# the session does nothing at the login field (#224). natural-scroll stays off to
+# match modules/input.lua; enable-tap only affects touchpad devices.
+libinput_ini() { printf '[libinput]\nenable-tap=true\nnatural-scroll=false\n\n'; }
+
+# weston runs as a supervised child, never exec'd. SDDM 0.21 cannot tell a
+# greeter that died from one that logged somebody in: sddm-helper-start-wayland
+# exits 0 whenever the greeter client finishes or the compositor dies, the daemon
+# reads that as HELPER_SUCCESS and starts nothing, and the box sits on an empty
+# VT with a blinking cursor. So a weston that dies on its own (no DRM device yet,
+# a card the driver has not finished bringing up, a seat that is not ready) is
+# logged with its last lines and started again, with the card re-chosen, while
+# SDDM is still waiting for the socket. A stop request from the helper (the
+# greeter finished, SDDM gave up on the socket) is forwarded and ends the loop.
+stopping=0
+child=""
+on_stop() {
+  stopping=1
+  [ -n "$child" ] && kill -TERM "$child" 2>/dev/null
+}
+trap on_stop TERM INT HUP
+
+# sleep that a stop request interrupts.
+pause() {
+  sleep "$1" &
+  child=$!
+  wait "$child" 2>/dev/null
+  child=""
+}
+
+last_err=""
+start_weston() {
+  local errlog status
+  errlog="$(mktemp --tmpdir tsukuyomi-greeter.XXXXXX.log 2>/dev/null)" || errlog=/dev/null
+  # stderr stays live for SDDM's own log and is kept for the failure report.
+  weston "$@" 2> >(tee -a "$errlog" >&2) &
+  child=$!
+  wait "$child"
+  status=$?
+  while kill -0 "$child" 2>/dev/null; do
+    wait "$child"
+    status=$?
+  done
+  child=""
+  sleep 0.1
+  last_err="$(tail -n 4 "$errlog" 2>/dev/null)"
+  [ "$errlog" = /dev/null ] || rm -f "$errlog"
+  return "$status"
+}
+
+# plain weston (preferred mode); the login screen must always start. Hand it a
+# [core]+[shell] config too so the pointer has a theme even when no modes parse.
+weston_plain() {
+  local pini
+  if pini="$(mktemp --tmpdir tsukuyomi-greeter.XXXXXX.ini 2>/dev/null)" &&
+    { printf '[core]\nidle-time=0\n\n'; shell_ini; libinput_ini; keyboard_ini; } >"$pini"; then
+    start_weston --shell=kiosk "${weston_args[@]}" --config="$pini" "$@"
+  else
+    start_weston --shell=kiosk "${weston_args[@]}" "$@"
+  fi
+}
+
+command -v weston >/dev/null 2>&1 || { echo "tsukuyomi-greeter: weston not found" >&2; exit 127; }
+
+# Per connected connector, pick the largest resolution then its highest refresh.
+# Output: "<name> <w> <h> <refresh-string>" lines. Refresh is kept verbatim from
+# modetest so weston matches the exact modelist entry. modetest holds no DRM
+# master, so this is safe to poll before weston takes the card.
+#
+# modetest's -D is a legacy bus id, not a device node: a /dev/dri path never
+# opens anything. -M opens the first card bound to the named DRM driver, so a
+# second card on the same driver could answer instead; only connectors sysfs
+# reports connected on the selected card are kept. Fails when the card cannot
+# be probed at all, so the caller stops polling instead of waiting out the
+# deadline in front of a black screen.
+probe_modes() {
+  local driver connected out
+  [ -n "$selected_card" ] || return 1
+  driver="$(sed -n 's/^DRIVER=//p' "$drm_root/$selected_card/device/uevent" 2>/dev/null)"
+  [ -n "$driver" ] || return 1
+  out="$(modetest -M "$driver" -c 2>/dev/null)" || return 1
+  connected="$(card_connected_names "$selected_card")"
+  printf '%s\n' "$out" | awk -v connected="$connected" '
+    BEGIN { n = split(connected, names, " "); for (i = 1; i <= n; i++) live[names[i]] = 1 }
+    /^Connectors:/ { insec = 1; next }
+    /^(CRTCs|Encoders|Planes|Framebuffers):/ { insec = 0 }
+    !insec { next }
+    $3 == "connected"    { conn = ($4 in live) ? $4 : ""; next }
+    $3 == "disconnected" { conn = "";  next }
+    conn != "" && $1 ~ /^#[0-9]+$/ {
+      split($2, wh, "x"); w = wh[1] + 0; h = wh[2] + 0; rr = $3 + 0
+      if (w <= 0 || h <= 0 || rr <= 0) next
+      area = w * h
+      if (area > ba[conn] || (area == ba[conn] && rr > br[conn])) {
+        ba[conn] = area; br[conn] = rr; bw[conn] = w; bh[conn] = h; brs[conn] = $3
+      }
+    }
+    END { for (c in bw) printf "%s %d %d %s\n", c, bw[c], bh[c], brs[c] }
+  '
+}
+
+gen_ini() {
+  # idle-time=0: the login screen must never blank a display out from under the
+  # user. One [output] per connected panel at its top mode; the chosen primary
+  # also carries app-ids so kiosk-shell drops the greeter window there.
+  printf '[core]\nidle-time=0\n\n'
+  shell_ini
+  libinput_ini
+  keyboard_ini
+  while read -r name w h rr; do
+    [ -n "$name" ] && [ "${w:-0}" -gt 0 ] && [ "${h:-0}" -gt 0 ] || continue
+    printf '[output]\nname=%s\nmode=%sx%s@%s\n' "$name" "$w" "$h" "$rr"
+    [ -n "$greeter_primary" ] && [ "$name" = "$greeter_primary" ] &&
+      printf 'app-ids=%s\n' "$greeter_appid"
+    printf '\n'
+  done <<< "$modes"
+}
+
+# Inspect the generated config without starting the greeter.
+if [ "${TSUKUYOMI_GREETER_DRYRUN:-0}" = 1 ]; then
+  pick_weston_args
+  modes="$(probe_modes)"
+  greeter_primary="$(choose_primary "$greeter_primary")"
+  gen_ini
+  exit 0
+fi
+
+# Some boards bring one connector up a beat before another (DP a moment before
+# HDMI), so a greeter that probes once lights only the fast panel and the login
+# lands on the wrong screen -- or on just one of two. Poll until the connected
+# set holds steady, giving a slower panel time to arrive, then build the .ini
+# from the full set so weston lights every output. Bounded so the login screen
+# always starts; tune the floor and cap with TSUKUYOMI_GREETER_SETTLE and
+# TSUKUYOMI_GREETER_DEADLINE (seconds).
+settle="${TSUKUYOMI_GREETER_SETTLE:-1}"
+deadline="${TSUKUYOMI_GREETER_DEADLINE:-6}"
+
+# One weston start: choose the card, settle the connector set, build the config.
+# Returns weston's exit status.
+compose_and_start() {
+  local start last n elapsed ini
+  pick_weston_args
+  if ! command -v modetest >/dev/null 2>&1; then
+    weston_plain "$@"
+    return
+  fi
+  start=$SECONDS
+  modes=""
+  last=-1
+  while :; do
+    if ! modes="$(probe_modes)"; then
+      modes=""
+      break
+    fi
+    n=$(printf '%s' "$modes" | awk 'NF { c++ } END { print c + 0 }')
+    elapsed=$(( SECONDS - start ))
+    [ "$elapsed" -ge "$deadline" ] && break
+    [ "$n" -gt 0 ] && [ "$n" -eq "$last" ] && [ "$elapsed" -ge "$settle" ] && break
+    last="$n"
+    sleep 0.3
+  done
+  if [ -z "$modes" ]; then
+    weston_plain "$@"
+    return
+  fi
+  # Pin the login form to the resolved output now that the full connected set is in.
+  greeter_primary="$(choose_primary "$greeter_primary")"
+  if ! ini="$(mktemp --tmpdir tsukuyomi-greeter.XXXXXX.ini 2>/dev/null)"; then
+    weston_plain "$@"
+    return
+  fi
+  gen_ini > "$ini"
+  if [ ! -s "$ini" ]; then
+    weston_plain "$@"
+    return
+  fi
+  start_weston --shell=kiosk "${weston_args[@]}" --config="$ini" "$@"
+}
+
+# Each failure is reported once to the system log (journal or socklog), where a
+# user at a text console can read why the login screen is missing.
+report_death() {
+  local attempt=$1 status=$2 detail
+  detail="weston exited with status $status (attempt $attempt, card ${selected_card:-none})"
+  [ -n "$last_err" ] && detail="$detail: $(printf '%s' "$last_err" | tr '\n' ' ')"
+  echo "tsukuyomi-greeter: $detail" >&2
+  logger -t tsukuyomi-greeter -p daemon.err -- "$detail" 2>/dev/null || true
+}
+
+# Retries stop after this many starts; SDDM's own socket wait (15s) usually ends
+# the helper first, and the guard restarts the display manager after that.
+retry_limit="${TSUKUYOMI_GREETER_RETRY_LIMIT:-10}"
+attempt=0
+delay=1
+while :; do
+  attempt=$(( attempt + 1 ))
+  compose_and_start "$@"
+  status=$?
+  [ "$stopping" = 1 ] && exit "$status"
+  report_death "$attempt" "$status"
+  [ "$attempt" -ge "$retry_limit" ] && exit "$status"
+  pause "$delay"
+  [ "$stopping" = 1 ] && exit 0
+  delay=$(( delay * 2 ))
+  [ "$delay" -gt 5 ] && delay=5
+done

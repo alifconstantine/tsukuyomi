@@ -1,0 +1,3 @@
+module Tsukuyomi.Lock
+singleton TimeFormat 1.0 TimeFormat.qml
+singleton I18n 1.0 I18n.qml

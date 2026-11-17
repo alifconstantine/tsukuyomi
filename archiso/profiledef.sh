@@ -27,5 +27,9 @@ file_permissions=(
   ["/usr/local/bin/tsukuyomi-install"]="0:0:755"
   ["/usr/local/bin/tsukuyomi-fetch"]="0:0:755"
   ["/usr/local/bin/tsukuyomi-boot-apply"]="0:0:755"
+  ["/usr/local/bin/tsukuyomi-lock"]="0:0:755"
+  ["/usr/local/bin/tsukuyomi-greeter"]="0:0:755"
+  ["/usr/local/bin/tsukuyomi-wayland-session"]="0:0:755"
+  ["/usr/local/bin/tsukuyomi-greeter-guard"]="0:0:755"
   ["/usr/local/lib/tsukuyomi/backend/tsukuyomi-install"]="0:0:755"
 )

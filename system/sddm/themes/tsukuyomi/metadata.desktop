@@ -1,7 +1,7 @@
 [SddmGreeterTheme]
 Name=Tsukuyomi
-Description=Minimalist dark obsidian and crimson SDDM greeter for Tsukuyomi OS.
-Author=Tsukuyomi OS
+Description=Tsukuyomi OS clockwork orbital greeter (adapted from Ryoku qylock).
+Author=Tsukuyomi OS / Darkkal44 / Ryoku contributors
 Type=sddm-theme
 MainScript=Main.qml
 ConfigFile=theme.conf
