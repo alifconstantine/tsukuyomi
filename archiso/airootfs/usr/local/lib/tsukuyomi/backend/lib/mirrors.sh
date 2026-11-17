@@ -54,11 +54,11 @@ tsukuyomi_rank_mirrors() {
   TSUKUYOMI_MIRROR_TIER=0
 
   if [[ -n ${TSUKUYOMI_DRYRUN:-} ]]; then
-    log "mirrors: would tune ParallelDownloads=4 and rank Arch mirrors"
+    log "mirrors: would tune ParallelDownloads=8 and rank Arch mirrors"
     return 0
   fi
 
-  tsukuyomi_tune_pacman_downloads 4
+  tsukuyomi_tune_pacman_downloads 8
   TSUKUYOMI_MIRROR_SHIPPED=$(mktemp) && cp -- "$list" "$TSUKUYOMI_MIRROR_SHIPPED" 2>/dev/null || TSUKUYOMI_MIRROR_SHIPPED=""
 
   local ranked
