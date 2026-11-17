@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -98,5 +99,56 @@ func TestDryRunBackendScript(t *testing.T) {
 	s := string(out)
 	if !strings.Contains(s, "@@TSUKUYOMI_DONE") || !strings.Contains(s, "brave-bin") {
 		t.Fatalf("expected @@TSUKUYOMI_DONE and brave-bin in backend output, got:\n%s", s)
+	}
+}
+
+func TestDoneExitActions(t *testing.T) {
+	origCmd := exitCommand
+	origFile := exitActionFile
+	defer func() {
+		exitCommand = origCmd
+		exitActionFile = origFile
+	}()
+
+	marker := t.TempDir() + "/exit-action"
+	exitActionFile = marker
+
+	var calls []string
+	exitCommand = func(name string, args ...string) *exec.Cmd {
+		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
+		return exec.Command("true")
+	}
+
+	m := initialModel(true)
+	m.state = stepDone
+	m.doneCursor = 0
+	next, _ := m.onKey("enter")
+	if got := next.(model).exitAction; got != "reboot" {
+		t.Fatalf("expected exitAction reboot, got %q", got)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("expected no exit command run inside Update, got %v", calls)
+	}
+
+	if err := applyExit("reboot", false); err != nil {
+		t.Fatalf("applyExit(reboot) failed: %v", err)
+	}
+	if got := strings.Join(calls, "; "); got != "sync; systemctl reboot" {
+		t.Fatalf("unexpected commands: %q", got)
+	}
+	if data, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(data)) != "reboot" {
+		t.Fatalf("expected marker file reboot, got %q err=%v", string(data), err)
+	}
+	if err := applyExit("shell", false); err != nil {
+		t.Fatalf("applyExit(shell) failed: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected shell exit not to execute extra commands, got %v", calls)
+	}
+	if err := applyExit("reboot", true); err != nil {
+		t.Fatalf("applyExit dry-run failed: %v", err)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("expected dry-run not to execute reboot, got %v", calls)
 	}
 }

@@ -89,6 +89,7 @@ if ! command -v tsukuyomi-tui >/dev/null 2>&1; then
   exit 0
 fi
 
+rm -f /run/tsukuyomi-exit-action
 wait_for_kms || echo "tsukuyomi: no KMS connector detected; falling back to console VT." >>"$log"
 
 tries=0
@@ -104,5 +105,20 @@ while true; do
   fi
   sleep 1
 done
+
+exit_action=""
+if [[ -r /run/tsukuyomi-exit-action ]]; then
+  IFS= read -r exit_action </run/tsukuyomi-exit-action || true
+  rm -f /run/tsukuyomi-exit-action
+fi
+
+case "$exit_action" in
+  reboot|poweroff)
+    printf '\ntsukuyomi: %s initiated; waiting for systemd...\n' "$exit_action" >&2
+    systemctl "$exit_action" >/dev/null 2>&1 || "$exit_action" >/dev/null 2>&1 || true
+    sleep 15
+    exit 0
+    ;;
+esac
 
 recovery_notice

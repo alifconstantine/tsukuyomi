@@ -172,6 +172,7 @@ type model struct {
 	abortArmed bool
 	abortAt    time.Time
 	doneCursor int
+	exitAction string
 }
 
 func initialModel(dryRun bool) model {
@@ -670,15 +671,18 @@ func (m model) keyDone(k string) (tea.Model, tea.Cmd) {
 		m.doneCursor = (m.doneCursor + 2) % 3
 	case "down", "j", "right", "l", "tab":
 		m.doneCursor = (m.doneCursor + 1) % 3
+	case "1":
+		m.doneCursor = 0
+	case "2":
+		m.doneCursor = 1
+	case "3":
+		m.doneCursor = 2
+	case "q":
+		m.exitAction = "shell"
+		return m, tea.Quit
 	case "enter":
-		if m.dryRun || m.doneCursor == 2 {
-			return m, tea.Quit
-		}
-		if m.doneCursor == 0 {
-			_ = exec.Command("systemctl", "reboot").Start()
-		} else if m.doneCursor == 1 {
-			_ = exec.Command("systemctl", "poweroff").Start()
-		}
+		actions := []string{"reboot", "poweroff", "shell"}
+		m.exitAction = actions[m.doneCursor]
 		return m, tea.Quit
 	}
 	return m, nil
@@ -1312,6 +1316,27 @@ func renderSelectableList(items []string, cursor, height int) string {
 	return strings.Join(out, "\n")
 }
 
+var (
+	exitCommand    = exec.Command
+	exitActionFile = "/run/tsukuyomi-exit-action"
+)
+
+// applyExit writes the chosen post-install action for tsukuyomi-installer-session
+// and executes reboot/poweroff synchronously after Bubble Tea restores the TTY.
+func applyExit(action string, dryRun bool) error {
+	if dryRun || (action != "reboot" && action != "poweroff") {
+		return nil
+	}
+	if exitActionFile != "" {
+		_ = os.WriteFile(exitActionFile, []byte(action+"\n"), 0o644)
+	}
+	_ = exitCommand("sync").Run()
+	if err := exitCommand("systemctl", action).Run(); err != nil {
+		return exitCommand(action).Run()
+	}
+	return nil
+}
+
 func main() {
 	dryRun := os.Getenv("TSUKUYOMI_DRYRUN") == "1"
 	for _, arg := range os.Args[1:] {
@@ -1320,8 +1345,15 @@ func main() {
 		}
 	}
 	p := tea.NewProgram(initialModel(dryRun))
-	if _, err := p.Run(); err != nil {
+	fm, err := p.Run()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "tsukuyomi-tui: %v\n", err)
 		os.Exit(1)
+	}
+	if m, ok := fm.(model); ok {
+		if err := applyExit(m.exitAction, m.dryRun); err != nil {
+			fmt.Fprintf(os.Stderr, "tsukuyomi-tui: %s failed: %v\n", m.exitAction, err)
+			os.Exit(1)
+		}
 	}
 }
