@@ -33,3 +33,19 @@ file_permissions=(
   ["/usr/local/bin/tsukuyomi-greeter-guard"]="0:0:755"
   ["/usr/local/lib/tsukuyomi/backend/tsukuyomi-install"]="0:0:755"
 )
+
+# mkarchiso copies airootfs/ with --no-preserve=ownership,mode; preserve 0755 on all
+# shell/python helpers in /etc/skel/.config and Tsukuyomi runtime asset dirs.
+while IFS= read -r -d '' _tsukuyomi_exec; do
+  file_permissions["/${_tsukuyomi_exec#airootfs/}"]="0:0:755"
+done < <(
+  find \
+    airootfs/etc/skel/.config \
+    airootfs/usr/share/tsukuyomi/boot \
+    airootfs/usr/share/tsukuyomi/fastfetch \
+    airootfs/usr/share/tsukuyomi/lockscreen \
+    airootfs/usr/share/tsukuyomi/sddm \
+    -type f \( -perm -111 -o -name '*.sh' -o -name '*.py' \) \
+    -print0 2>/dev/null
+)
+unset _tsukuyomi_exec
