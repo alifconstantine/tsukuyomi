@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tsukuyomi Fastfetch wrapper with easy Tsukuyomi <-> Arch logo switching.
+# Tsukuyomi Fastfetch wrapper with kitty-direct PNG emblem and Tsukuyomi <-> Arch switching.
 set -euo pipefail
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastfetch"
@@ -27,6 +27,49 @@ resolve_preset() {
     echo "tsukuyomi-fetch: preset '$mode' not found" >&2
     return 1
   fi
+}
+
+resolve_emblem() {
+  if [[ -f "$CONFIG_DIR/tsukuyomi-emblem.png" ]]; then
+    printf '%s\n' "$CONFIG_DIR/tsukuyomi-emblem.png"
+  elif [[ -f "$SYSTEM_DIR/tsukuyomi-emblem.png" ]]; then
+    printf '%s\n' "$SYSTEM_DIR/tsukuyomi-emblem.png"
+  fi
+}
+
+supports_kitty_graphics() {
+  [[ -n "${KITTY_WINDOW_ID:-}" || "${TERM:-}" == "xterm-kitty" || "${TERM:-}" == "xterm-ghostty" || "${TERM_PROGRAM:-}" == "ghostty" ]]
+}
+
+run_preset() {
+  local cfg=$1 mode=${2:-tsukuyomi}
+  shift 2
+  local emblem="" has_custom_cfg=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      -c|--config|--config=*) has_custom_cfg=1; break ;;
+    esac
+  done
+  local -a cfg_args=()
+  if (( ! has_custom_cfg )); then
+    cfg_args=(--config "$cfg")
+  fi
+  if [[ "$mode" == "tsukuyomi" ]] && supports_kitty_graphics; then
+    emblem=$(resolve_emblem || true)
+  fi
+  if [[ -n "$emblem" ]]; then
+    exec fastfetch "${cfg_args[@]}" \
+      --logo-type kitty-direct \
+      --logo "$emblem" \
+      --logo-width 26 \
+      --logo-height 13 \
+      --logo-padding-top 2 \
+      --logo-padding-left 2 \
+      --logo-padding-right 4 \
+      --pipe false \
+      "$@"
+  fi
+  exec fastfetch "${cfg_args[@]}" "$@"
 }
 
 logo_mode=""
@@ -87,13 +130,17 @@ if [[ -n $logo_mode ]]; then
     *) echo "tsukuyomi-fetch: unsupported logo '$logo_mode' (want tsukuyomi|arch)" >&2; exit 2 ;;
   esac
   preset=$(resolve_preset "$logo_mode")
-  exec fastfetch --config "$preset" "${extra_args[@]}"
+  run_preset "$preset" "$logo_mode" "${extra_args[@]}"
 fi
 
 if [[ -f "$CONFIG_DIR/config.jsonc" ]]; then
-  exec fastfetch --config "$CONFIG_DIR/config.jsonc" "${extra_args[@]}"
+  active_mode="tsukuyomi"
+  if grep -q '"source"[[:space:]]*:[[:space:]]*"arch"' "$CONFIG_DIR/config.jsonc" 2>/dev/null; then
+    active_mode="arch"
+  fi
+  run_preset "$CONFIG_DIR/config.jsonc" "$active_mode" "${extra_args[@]}"
 elif [[ -f "$SYSTEM_DIR/config-tsukuyomi.jsonc" ]]; then
-  exec fastfetch --config "$SYSTEM_DIR/config-tsukuyomi.jsonc" "${extra_args[@]}"
+  run_preset "$SYSTEM_DIR/config-tsukuyomi.jsonc" "tsukuyomi" "${extra_args[@]}"
 else
   exec fastfetch "${extra_args[@]}"
 fi
