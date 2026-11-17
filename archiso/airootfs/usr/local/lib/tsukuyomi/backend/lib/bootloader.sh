@@ -55,9 +55,18 @@ tsukuyomi_bootloader() {
   # Remove any shadowing limine.conf elsewhere on ESP
   run rm -rf /mnt/boot/limine /mnt/boot/EFI/limine/limine.conf
 
-  # Build UKI + initramfs and update /boot/limine.conf
-  if chroot_has limine-mkinitcpio; then
-    # Write branding globals only; limine-mkinitcpio populates the /+Tsukuyomi OS tree.
+  # Build UKI + initramfs once and update /boot/limine.conf
+  if chroot_has limine-update; then
+    # Write branding globals only; limine-update invokes limine-install + limine-mkinitcpio once.
+    if [[ -f "$TSUKUYOMI_SHARE/boot/limine/limine.conf" ]]; then
+      local globals
+      globals=$(awk '/^\/[^\/]/{exit} {print}' "$TSUKUYOMI_SHARE/boot/limine/limine.conf")
+      write_file /mnt/boot/limine.conf <<<"$globals"
+    fi
+    log "building UKI & deploying Limine via limine-update"
+    run arch-chroot /mnt limine-update
+    tsukuyomi_limine_repoint_default /mnt/boot/limine.conf
+  elif chroot_has limine-mkinitcpio; then
     if [[ -f "$TSUKUYOMI_SHARE/boot/limine/limine.conf" ]]; then
       local globals
       globals=$(awk '/^\/[^\/]/{exit} {print}' "$TSUKUYOMI_SHARE/boot/limine/limine.conf")
@@ -65,7 +74,6 @@ tsukuyomi_bootloader() {
     fi
     log "building UKI via limine-mkinitcpio"
     run arch-chroot /mnt limine-mkinitcpio
-    chroot_has limine-update && run arch-chroot /mnt limine-update
     tsukuyomi_limine_repoint_default /mnt/boot/limine.conf
   else
     if [[ -f "$TSUKUYOMI_SHARE/boot/limine/limine.conf" ]]; then

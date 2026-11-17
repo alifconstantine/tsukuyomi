@@ -23,7 +23,15 @@ tsukuyomi_deploy_desktop() {
       run install -m 0755 "/usr/local/bin/$bin_name" "/mnt/usr/local/bin/$bin_name"
     fi
   done
-  run cp -a "$TSUKUYOMI_SHARE/." /mnt/usr/share/tsukuyomi/
+  if [[ -n ${TSUKUYOMI_DRYRUN:-} ]]; then
+    run cp -a "$TSUKUYOMI_SHARE/." /mnt/usr/share/tsukuyomi/
+  else
+    local share_item
+    for share_item in "$TSUKUYOMI_SHARE"/*; do
+      [[ -e $share_item && $(basename "$share_item") != "offline" ]] || continue
+      run cp -a "$share_item" /mnt/usr/share/tsukuyomi/
+    done
+  fi
 
   if [[ -d "$TSUKUYOMI_SHARE/lockscreen" ]]; then
     run find /mnt/usr/share/tsukuyomi/lockscreen -maxdepth 1 -type f \( -name '*.sh' -o -name 'tsukuyomi-lock' \) -exec chmod 0755 {} +
@@ -109,12 +117,16 @@ EOF
   # Guarantee Google Sans Flex is installed even if AUR/local repo skipped it
   tsukuyomi_ensure_google_sans_flex
 
-  # Prepare end-4 Python venv if online (non-fatal if offline)
+  # Prepare end-4 Python venv if online or wheels staged (non-fatal if offline)
   if [[ -f "$TSUKUYOMI_SHARE/shell/requirements.txt" ]] && chroot_has uv; then
     log "setting up end-4 Quickshell Python environment (.venv)"
+    local uv_wheel_flags=""
+    if [[ -d /mnt/usr/share/tsukuyomi/shell/wheels ]] && compgen -G "/mnt/usr/share/tsukuyomi/shell/wheels/*.whl" >/dev/null; then
+      uv_wheel_flags="--no-index --find-links /usr/share/tsukuyomi/shell/wheels"
+    fi
     run arch-chroot /mnt runuser -u "$user" -- env \
       "HOME=/home/$user" "USER=$user" "LOGNAME=$user" "UV_LINK_MODE=copy" bash -c \
-      "mkdir -p ~/.local/state/quickshell && uv venv --prompt .venv ~/.local/state/quickshell/.venv -p 3.12 && uv pip install --python ~/.local/state/quickshell/.venv/bin/python -r /usr/share/tsukuyomi/shell/requirements.txt" \
+      "mkdir -p ~/.local/state/quickshell && uv venv --prompt .venv ~/.local/state/quickshell/.venv -p 3.12 && uv pip install --python ~/.local/state/quickshell/.venv/bin/python $uv_wheel_flags -r /usr/share/tsukuyomi/shell/requirements.txt" \
       || log "warning: uv Python venv setup skipped or offline; run 'uv pip install' on first boot if needed"
   fi
 
@@ -267,7 +279,8 @@ tsukuyomi_install_staged_pkgbuilds() {
     [[ -f "$pkgbuild_dir/PKGBUILD" ]] || continue
     name=$(basename "$pkgbuild_dir")
     log "PKGBUILD: building & installing %s" "$name"
-    work="/tmp/tsukuyomi-pkg-$name"
+    # Note: use /var/tmp instead of /tmp because arch-chroot mounts a blank tmpfs over /mnt/tmp.
+    work="/var/tmp/tsukuyomi-pkg-$name"
     run rm -rf "/mnt$work"
     run mkdir -p "/mnt$work"
     run cp -a "$pkgbuild_dir/." "/mnt$work/"
@@ -291,9 +304,41 @@ tsukuyomi_install_aur_layer() {
     local_pkgs=("$local_repo"/*.pkg.tar.zst)
     shopt -u nullglob
     if (( ${#local_pkgs[@]} > 0 )); then
-      run mkdir -p /mnt/tmp/tsukuyomi-repo
-      run cp -a "${local_pkgs[@]}" /mnt/tmp/tsukuyomi-repo/
-      run arch-chroot /mnt bash -c 'pacman -U --noconfirm --needed /tmp/tsukuyomi-repo/*.pkg.tar.zst && rm -rf /tmp/tsukuyomi-repo'
+      # Copy into /mnt/usr/share/tsukuyomi/repo/x86_64 if not already there from cp -a $TSUKUYOMI_SHARE;
+      # never stage under /mnt/tmp because arch-chroot mounts a fresh tmpfs over /mnt/tmp.
+      local chroot_repo="/usr/share/tsukuyomi/repo/x86_64"
+      if [[ -z ${TSUKUYOMI_DRYRUN:-} ]] && ! compgen -G "/mnt${chroot_repo}/*.pkg.tar.zst" >/dev/null 2>&1; then
+        chroot_repo="/var/tmp/tsukuyomi-repo"
+        run rm -rf "/mnt${chroot_repo}"
+        run mkdir -p "/mnt${chroot_repo}"
+        run cp -a "${local_pkgs[@]}" "/mnt${chroot_repo}/"
+      fi
+      if tsukuyomi_offline_active; then
+        local off_conf="/etc/pacman.d/tsukuyomi-offline.conf"
+        local did_bind=0
+        run mkdir -p /mnt/usr/share/tsukuyomi/offline/repo
+        if [[ -z ${TSUKUYOMI_DRYRUN:-} ]] && ! mountpoint -q /mnt/usr/share/tsukuyomi/offline/repo 2>/dev/null; then
+          mount --bind "$TSUKUYOMI_OFFLINE_REPO" /mnt/usr/share/tsukuyomi/offline/repo && did_bind=1
+        fi
+        write_file "/mnt${off_conf}" <<EOF
+[options]
+Architecture = auto
+HoldPkg     = pacman glibc
+ParallelDownloads = 8
+SigLevel    = Never
+LocalFileSigLevel = Never
+
+[tsukuyomi-offline]
+SigLevel = Never
+Server = file:///usr/share/tsukuyomi/offline/repo
+EOF
+        run arch-chroot /mnt bash -c "pacman --config '$off_conf' -U --noconfirm --needed '$chroot_repo'/*.pkg.tar.zst"
+        (( did_bind == 1 )) && umount /mnt/usr/share/tsukuyomi/offline/repo 2>/dev/null || true
+        run rm -f "/mnt${off_conf}" /mnt/var/lib/pacman/sync/tsukuyomi-offline.db* /mnt/var/lib/pacman/sync/tsukuyomi-offline.files*
+      else
+        run arch-chroot /mnt bash -c "pacman -U --noconfirm --needed '$chroot_repo'/*.pkg.tar.zst || (pacman -Sy --noconfirm && pacman -U --noconfirm --needed '$chroot_repo'/*.pkg.tar.zst)"
+      fi
+      run rm -rf /mnt/usr/share/tsukuyomi/repo /mnt/usr/share/tsukuyomi/offline /mnt/var/tmp/tsukuyomi-repo
       return 0
     fi
   fi
