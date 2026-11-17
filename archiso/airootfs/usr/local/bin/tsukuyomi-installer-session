@@ -27,8 +27,9 @@ native_res() {
 
 wait_for_kms() {
   local n=0
-  while ((n++ < 25)); do
+  while ((n < 15)); do
     compgen -G '/dev/dri/card*' >/dev/null 2>&1 && grep -qxs connected "$sysfs"/class/drm/card*-*/status && return 0
+    n=$((n + 1))
     sleep 0.2
   done
   return 1
@@ -46,11 +47,16 @@ run_graphical() {
   command -v cage >/dev/null 2>&1 && command -v foot >/dev/null 2>&1 || return 1
   compgen -G '/dev/dri/card*' >/dev/null 2>&1 || return 1
 
+  if command -v plymouth >/dev/null 2>&1 && plymouth --ping >/dev/null 2>&1; then
+    plymouth quit >/dev/null 2>&1 || true
+  fi
+
   local cw ch pt
   read -r cw ch <<<"$(native_res)"
   pt=$(foot_pt "$ch")
   echo "tsukuyomi: panel ${cw}x${ch}, kiosk font ${pt}pt." >>"$log"
 
+  printf '\033[2J\033[H' >/dev/tty1 2>/dev/null || true
   env TSUKUYOMI_SESSION=graphical \
     cage -m last -- foot \
       -o term=xterm-256color \

@@ -41,7 +41,10 @@ wpa_supplicant
 wireless-regdb
 kbd
 
-# Minimal Wayland kiosk + truecolor terminal for tsukuyomi-tui
+# Minimal Wayland kiosk + truecolor terminal + Plymouth splash for tsukuyomi-tui
+plymouth
+mesa
+xorg-xwayland
 cage
 foot
 ttf-jetbrains-mono-nerd
