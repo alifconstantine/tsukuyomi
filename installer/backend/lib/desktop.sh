@@ -258,6 +258,7 @@ tsukuyomi_install_staged_pkgbuilds() {
   local pkgbuild_dir name work
   local -a staged_dirs=(
     "$TSUKUYOMI_SHARE/packages/pkgbuilds/ttf-google-sans-flex"
+    "$TSUKUYOMI_SHARE/packages/pkgbuilds/otf-space-grotesk"
     "$TSUKUYOMI_SHARE/shell/dist-arch/illogical-impulse-bibata-modern-classic-bin"
     "$TSUKUYOMI_SHARE/shell/dist-arch/illogical-impulse-microtex-git"
   )
@@ -307,7 +308,7 @@ EOF
   tsukuyomi_install_staged_pkgbuilds "$user"
 
   local -a aur_pkgs=()
-  mapfile -t aur_pkgs < <(grep -vE '^[[:space:]]*(#|$|illogical-impulse-|ttf-google-sans-flex$)' "$aur_file" || true)
+  mapfile -t aur_pkgs < <(grep -vE '^[[:space:]]*(#|$|illogical-impulse-|ttf-google-sans-flex$|otf-space-grotesk$)' "$aur_file" || true)
 
   local helper=""
   if chroot_has paru; then
