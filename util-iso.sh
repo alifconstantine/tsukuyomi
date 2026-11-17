@@ -80,7 +80,11 @@ prepare_profile() {
 
     # Sync tsukuyomi-shell + Tsukuyomi assets + compiled TUI into airootfs
     if [[ -x "${src_dir}/../scripts/sync-to-iso.sh" ]]; then
-        "${src_dir}/../scripts/sync-to-iso.sh"
+        if (( EUID == 0 )) && [[ -n ${SUDO_USER:-} ]]; then
+            runuser -u "$SUDO_USER" -- "${src_dir}/../scripts/sync-to-iso.sh"
+        else
+            "${src_dir}/../scripts/sync-to-iso.sh"
+        fi
     fi
 
     fetch_cachyos_mirrorlist
@@ -98,6 +102,15 @@ prepare_profile() {
     generate_environment
     generate_version_tag "${_iso_version}"
     generate_edition_tag "tsukuyomi"
+
+    if (( EUID == 0 )) && [[ -n ${SUDO_UID:-} && -n ${SUDO_GID:-} ]]; then
+        chown -R "${SUDO_UID}:${SUDO_GID}" "${src_dir}/archiso/packages.x86_64" \
+            "${src_dir}/archiso/airootfs/etc/pacman.d/cachyos-mirrorlist" \
+            "${src_dir}/archiso/airootfs/etc/environment" \
+            "${src_dir}/archiso/airootfs/etc/version-tag" \
+            "${src_dir}/archiso/airootfs/etc/edition-tag" \
+            "${src_dir}/archiso/airootfs/etc/systemd/system" 2>/dev/null || true
+    fi
 
     iso_file=$(gen_iso_fn).iso
 }

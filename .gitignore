@@ -24,4 +24,9 @@ archiso/airootfs/etc/version-tag
 repo/x86_64/*.pkg.tar.zst*
 repo/x86_64/*.db*
 repo/x86_64/*.files*
+repo/offline/
+repo/offline-cache/
+repo/uv-wheels/
 archiso/airootfs/usr/share/tsukuyomi/repo/
+archiso/airootfs/usr/share/tsukuyomi/offline/
+archiso/airootfs/usr/share/tsukuyomi/shell/wheels/
