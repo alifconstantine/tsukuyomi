@@ -61,8 +61,9 @@ run_preset() {
     exec fastfetch "${cfg_args[@]}" \
       --logo-type kitty-direct \
       --logo "$emblem" \
-      --logo-width 26 \
-      --logo-height 13 \
+      --logo-width 28 \
+      --logo-height 14 \
+      --logo-preserve-aspect-ratio true \
       --logo-padding-top 2 \
       --logo-padding-left 2 \
       --logo-padding-right 4 \
