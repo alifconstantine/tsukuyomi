@@ -8,6 +8,8 @@ tsukuyomi_deploy_desktop() {
   run mkdir -p /mnt/etc/skel /mnt/usr/local/bin /mnt/usr/share/tsukuyomi
   run cp -a /etc/skel/. /mnt/etc/skel/
   run cp -a /etc/skel/. "/mnt/home/$user/"
+  run find /mnt/etc/skel/.config "/mnt/home/$user/.config" \
+    -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod 0755 {} +
   run arch-chroot /mnt chown -R "$user:$user" "/home/$user"
   run arch-chroot /mnt chmod 0700 "/home/$user"
 
