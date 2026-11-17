@@ -69,9 +69,52 @@ tsukuyomi_hooks_restore() {
   done
 }
 
+TSUKUYOMI_OFFLINE_REPO=""
+TSUKUYOMI_OFFLINE_CONF=""
+
+tsukuyomi_offline_active() {
+  [[ -n ${TSUKUYOMI_OFFLINE_REPO:-} && -f "$TSUKUYOMI_OFFLINE_REPO/tsukuyomi-offline.db.tar.gz" ]]
+}
+
+tsukuyomi_offline_prepare() {
+  local cand="$TSUKUYOMI_SHARE/offline/repo"
+  [[ -f "$cand/tsukuyomi-offline.db.tar.gz" ]] || return 0
+  TSUKUYOMI_OFFLINE_REPO="$cand"
+  TSUKUYOMI_OFFLINE_CONF="/tmp/tsukuyomi-offline-pacman.conf"
+  if [[ -n ${TSUKUYOMI_DRYRUN:-} ]]; then
+    log "offline: would configure [tsukuyomi-offline] -> file://%s" "$cand"
+    return 0
+  fi
+  cat >"$TSUKUYOMI_OFFLINE_CONF" <<EOF
+[options]
+Architecture = auto
+HoldPkg     = pacman glibc
+ParallelDownloads = 8
+SigLevel    = Never
+LocalFileSigLevel = Never
+
+[tsukuyomi-offline]
+SigLevel = Never
+Server = file://$cand
+EOF
+  log "offline: using baked [tsukuyomi-offline] repository at %s" "$cand"
+}
+
 tsukuyomi_pacstrap_with_retry() {
   local -a pkgs=("$@")
-  if run pacstrap -K /mnt --noconfirm "${pkgs[@]}"; then
+
+  if tsukuyomi_offline_active; then
+    if run pacstrap -C "$TSUKUYOMI_OFFLINE_CONF" -K /mnt --noconfirm "${pkgs[@]}"; then
+      [[ -f /etc/pacman.conf ]] && run install -m 0644 /etc/pacman.conf /mnt/etc/pacman.conf
+      return 0
+    fi
+    log "offline pacstrap failed; falling back to online mirrors"
+    TSUKUYOMI_OFFLINE_REPO=""
+    TSUKUYOMI_OFFLINE_CONF=""
+    tsukuyomi_rank_mirrors
+  fi
+
+  if run pacstrap -K -P /mnt --noconfirm "${pkgs[@]}"; then
     return 0
   fi
 
@@ -79,14 +122,14 @@ tsukuyomi_pacstrap_with_retry() {
   run_sh 'rm -f /mnt/var/cache/pacman/pkg/*.part 2>/dev/null || true'
   tsukuyomi_mirrors_fallback || true
 
-  if run pacstrap -K /mnt --noconfirm --needed --overwrite '*' "${pkgs[@]}"; then
+  if run pacstrap -K -P /mnt --noconfirm --needed --overwrite '*' "${pkgs[@]}"; then
     return 0
   fi
 
   log "retrying pacstrap once more with sequential downloads (ParallelDownloads=1)"
   tsukuyomi_tune_pacman_downloads 1
   run_sh 'rm -f /mnt/var/cache/pacman/pkg/*.part 2>/dev/null || true'
-  run pacstrap -K /mnt --noconfirm --needed --overwrite '*' "${pkgs[@]}"
+  run pacstrap -K -P /mnt --noconfirm --needed --overwrite '*' "${pkgs[@]}"
 }
 
 tsukuyomi_pacstrap() {
@@ -125,7 +168,10 @@ tsukuyomi_pacstrap() {
 
   tsukuyomi_ensure_keyring
   tsukuyomi_hooks_quiet
-  tsukuyomi_rank_mirrors
+  tsukuyomi_offline_prepare
+  if ! tsukuyomi_offline_active; then
+    tsukuyomi_rank_mirrors
+  fi
 
   log "pacstrapping %d packages into /mnt" "${#unique_pkgs[@]}"
   tsukuyomi_pacstrap_with_retry "${unique_pkgs[@]}"
