@@ -4,6 +4,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 // Published Ulrich Drepper SHA-512 crypt reference test vector.
@@ -27,13 +29,17 @@ func TestHashPasswordFormat(t *testing.T) {
 
 func TestDryRunWizardTransition(t *testing.T) {
 	m := initialModel(true)
-	if m.state != stepWelcome {
-		t.Fatalf("expected initial state welcome, got %s", m.state)
+	if m.state != stepIntro {
+		t.Fatalf("expected initial state intro, got %s", m.state)
 	}
 	if m.selectedBrowserPkg() != "brave-bin" {
 		t.Fatalf("expected default recommended browser brave-bin, got %s", m.selectedBrowserPkg())
 	}
-	next, _ := m.onKey("enter") // -> locale
+	next, _ := m.onKey("enter") // intro -> welcome
+	if next.(model).state != stepWelcome {
+		t.Fatalf("expected state welcome after intro, got %s", next.(model).state)
+	}
+	next, _ = next.(model).onKey("enter") // welcome -> locale
 	next, _ = next.(model).onKey("enter") // -> timezone
 	next, _ = next.(model).onKey("enter") // -> network
 	next, _ = next.(model).onKey("enter") // -> browser
@@ -47,8 +53,23 @@ func TestDryRunWizardTransition(t *testing.T) {
 	}
 }
 
+func TestIntroTimerAdvancesToWelcome(t *testing.T) {
+	m := initialModel(true)
+	if v := m.View(); !strings.Contains(v.Content, "TSUKUYOMI OS INSTALLER") {
+		t.Fatalf("expected intro banner view, got:\n%s", v.Content)
+	}
+	var cur tea.Model = m
+	for i := 0; i < 60; i++ {
+		cur, _ = cur.Update(introTickMsg{})
+	}
+	if cur.(model).state != stepWelcome {
+		t.Fatalf("expected intro ticks to transition to welcome, got %s", cur.(model).state)
+	}
+}
+
 func TestDryRunSidebarRender(t *testing.T) {
 	m := initialModel(true)
+	m.state = stepWelcome
 	m.w = 110
 	m.h = 34
 	v := m.View()

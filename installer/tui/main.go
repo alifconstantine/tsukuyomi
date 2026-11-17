@@ -62,6 +62,7 @@ var (
 )
 
 const (
+	stepIntro    = "intro"
 	stepWelcome  = "welcome"
 	stepLocale   = "locale"
 	stepTimezone = "timezone"
@@ -73,6 +74,20 @@ const (
 	stepInstall  = "install"
 	stepDone     = "done"
 )
+
+const introBanner = `███  ███  █ █  █ █  █ █  █ █  ███  █   █  ███
+ █   █    █ █  ██   █ █  █ █  █ █  ██ ██   █
+ █   ███  █ █  █    █ █   █   █ █  █ █ █   █
+ █     █  █ █  ██   █ █   █   █ █  █   █   █
+ █   ███  ███  █ █  ███   █   ███  █   █  ███`
+
+type introTickMsg time.Time
+
+func introTickCmd() tea.Cmd {
+	return tea.Tick(33*time.Millisecond, func(t time.Time) tea.Msg {
+		return introTickMsg(t)
+	})
+}
 
 var stepMeta = []struct {
 	key   string
@@ -90,10 +105,12 @@ var stepMeta = []struct {
 }
 
 type model struct {
-	w, h   int
-	dryRun bool
-	state  string
-	errMsg string
+	w, h       int
+	dryRun     bool
+	state      string
+	errMsg     string
+	introTick  int
+	introRatio float64
 
 	sys sysSnapshot
 
@@ -166,7 +183,7 @@ func initialModel(dryRun bool) model {
 
 	m := model{
 		dryRun:        dryRun,
-		state:         stepWelcome,
+		state:         stepIntro,
 		sys:           probeSystem(),
 		locales:       locs,
 		keymaps:       kms,
@@ -184,13 +201,34 @@ func initialModel(dryRun bool) model {
 	return m
 }
 
-func (m model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd {
+	if m.state == stepIntro {
+		return introTickCmd()
+	}
+	return nil
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		return m, nil
+	case introTickMsg:
+		if m.state != stepIntro {
+			return m, nil
+		}
+		m.introTick++
+		const fillTicks = 42.0
+		const holdTicks = 12
+		t := min(float64(m.introTick)/fillTicks, 1.0)
+		// Ease-out cubic for snappy terminal splash bar.
+		inv := 1.0 - t
+		m.introRatio = 1.0 - inv*inv*inv
+		if m.introTick >= int(fillTicks)+holdTicks {
+			m.state = stepWelcome
+			return m, nil
+		}
+		return m, introTickCmd()
 	case installLineMsg:
 		line := string(msg)
 		if strings.HasPrefix(line, "@@TSUKUYOMI_STEP ") {
@@ -248,6 +286,11 @@ func (m model) onKey(k string) (tea.Model, tea.Cmd) {
 
 	m.errMsg = ""
 	switch m.state {
+	case stepIntro:
+		if k == "q" {
+			return m, tea.Quit
+		}
+		m.state = stepWelcome
 	case stepWelcome:
 		if k == "enter" {
 			m.state = stepLocale
@@ -789,6 +832,18 @@ func (m model) View() tea.View {
 	w := max(m.w, 80)
 	h := max(m.h, 24)
 
+	if m.state == stepIntro {
+		placed := lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, m.viewIntro(),
+			lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(cBg)))
+		v := tea.NewView(placed)
+		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
+		v.BackgroundColor = cBg
+		v.ForegroundColor = cText
+		v.WindowTitle = "Tsukuyomi OS Installer"
+		return v
+	}
+
 	showRail := w >= 92
 	railW := 24
 	totalW := min(w-4, 108)
@@ -912,6 +967,42 @@ func (m model) renderBody(innerW, maxH int) string {
 		out += "\n\n" + boldFg(cErr, "! "+m.errMsg)
 	}
 	return out
+}
+
+func (m model) viewIntro() string {
+	bannerText := introBanner
+	fullCh, emptyCh := "█", "░"
+	if os.Getenv("TERM") == "dumb" {
+		bannerText = "T S U K U Y O M I"
+		fullCh, emptyCh = "#", "-"
+	}
+	banner := boldFg(cCrimson, bannerText)
+	subtitle := boldFg(cText, "月読") + fg(cMuted, "  ·  TSUKUYOMI OS INSTALLER")
+
+	const barW = 42
+	filled := int(m.introRatio * float64(barW))
+	if filled < 0 {
+		filled = 0
+	} else if filled > barW {
+		filled = barW
+	}
+	bar := fg(cCrimson, strings.Repeat(fullCh, filled)) + fg(cBorder, strings.Repeat(emptyCh, barW-filled))
+	dots := (m.introTick / 6) % 4
+	status := fg(cMuted, "Preparing installer"+strings.Repeat(".", dots)+strings.Repeat(" ", 3-dots))
+	hint := fg(cBorder, "Press any key to continue · Ctrl+C to quit")
+
+	return lipgloss.JoinVertical(
+		lipgloss.Center,
+		banner,
+		"",
+		subtitle,
+		"",
+		bar,
+		"",
+		status,
+		"",
+		hint,
+	)
 }
 
 func (m model) viewWelcome() string {
