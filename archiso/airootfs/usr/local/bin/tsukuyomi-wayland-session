@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+#
+# ryoku-wayland-session: SDDM's [Wayland] SessionCommand, preparing the DRM
+# handoff and a software renderer fallback before starting the chosen session.
+#
+# On a hybrid-GPU laptop (e.g. AMD iGPU + NVIDIA dGPU) the SDDM greeter runs as
+# weston on one VT; SDDM then starts the user session on the next VT without
+# waiting for weston to finish exiting, so weston can still hold a DRM device
+# ("[libseat] Could not take device: Device or resource busy" on /dev/dri/cardN)
+# when the session compositor probes KMS. Aquamarine drops that GPU -- often the
+# iGPU the panels hang off -- and falls back to a headless dGPU: a black screen
+# (issue #174). Weston releases its DRM master when its process exits; logind
+# also revokes the greeter's device access as soon as the user session becomes
+# foreground. Wait only while neither handoff has happened. The deadline keeps
+# a broken greeter from hanging login.
+set -u
+
+# environment.d is loaded by the user manager, not by the compositor process
+# SDDM starts. Pull only Ryoku's shared session contract into this launcher so
+# apps started directly by compositor keybinds see the same Qt, GTK, cursor,
+# QML and PATH values as user services.
+import_session_environment() {
+  local assignment name
+  command -v systemctl >/dev/null 2>&1 || return 0
+  while IFS= read -r assignment; do
+    [[ $assignment == *=* ]] || continue
+    name=${assignment%%=*}
+    case "$name" in
+      XCURSOR_THEME|XCURSOR_SIZE|QML_IMPORT_PATH|QML2_IMPORT_PATH|PATH|\
+      QT_QPA_PLATFORMTHEME|GDK_BACKEND|QT_QPA_PLATFORM|\
+      QT_AUTO_SCREEN_SCALE_FACTOR|QT_WAYLAND_DISABLE_WINDOWDECORATION|\
+      ELECTRON_OZONE_PLATFORM_HINT|GSK_RENDERER|TSUKUYOMI_POLKIT_AGENT|\
+      EDITOR|VISUAL)
+        # systemctl emits shell-escaped assignments, including ANSI-C quoted
+        # values for semicolons and wildcard characters.
+        eval "export $assignment"
+        ;;
+    esac
+  done < <(systemctl --user show-environment 2>/dev/null || true)
+}
+
+# Match Hyprland's hardware policy: only force NVIDIA's VA-API and GLX paths
+# when NVIDIA drives the connected internal panel. On an AMD/Intel-driven
+# hybrid laptop Mesa must choose the decoder itself.
+connected_panel_vendor() {
+  local drm="${TSUKUYOMI_DRM_CLASS_DIR:-/sys/class/drm}" connector card
+  for connector in "$drm"/card*-eDP-* "$drm"/card*-LVDS-* "$drm"/card*-DSI-*; do
+    [[ -r $connector/status ]] || continue
+    [[ $(<"$connector/status") == connected ]] || continue
+    card=${connector%-*}
+    card=${card%-*}
+    [[ -r $card/device/vendor ]] || continue
+    cat "$card/device/vendor"
+    return 0
+  done
+  return 1
+}
+session_is_foreground() {
+  local sid="${XDG_SESSION_ID:-}" active=""
+  [[ $sid =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  command -v loginctl >/dev/null 2>&1 || return 1
+  active="$(loginctl show-session "$sid" -p Active --value 2>/dev/null)" ||
+    return 1
+  [[ $active == yes ]]
+}
+
+apply_panel_gpu_environment() {
+  local nvidia="${TSUKUYOMI_NVIDIA_VERSION_PATH:-/proc/driver/nvidia/version}" vendor=""
+  [[ -r $nvidia ]] || return 0
+  vendor=$(connected_panel_vendor 2>/dev/null || true)
+  case "$vendor" in
+    0x8086|0x1002) return 0 ;;
+  esac
+  export LIBVA_DRIVER_NAME=nvidia
+  export NVD_BACKEND=direct
+  export __GLX_VENDOR_LIBRARY_NAME=nvidia
+  export __GL_GSYNC_ALLOWED=0
+  export __GL_VRR_ALLOWED=0
+}
+
+# A 2D-only virtual display exposes a KMS card but no render node. Mesa's
+# device-selected GBM path does not fall back to llvmpipe by itself, so the
+# compositor can map a grey output while every accelerated client fails to
+# paint. Force Mesa's GBM renderer only for that exact shape. A VM with 3D
+# acceleration has a renderD* node and keeps virgl/vmwgfx acceleration.
+needs_software_renderer() {
+  local dri="${TSUKUYOMI_DRI_DIR:-/dev/dri}" node have_card=0
+  for node in "$dri"/card[0-9]*; do
+    [[ -e $node ]] || continue
+    have_card=1
+    break
+  done
+  (( have_card )) || return 1
+  for node in "$dri"/renderD[0-9]*; do
+    [[ -e $node ]] && return 1
+  done
+  return 0
+}
+
+warn_nvidia_driver_mismatch() {
+  local version_path="${TSUKUYOMI_NVIDIA_VERSION_PATH:-/sys/module/nvidia/version}"
+  local modinfo_command="${TSUKUYOMI_MODINFO_COMMAND:-modinfo}"
+  local loaded installed
+
+  [[ -r $version_path ]] || return 0
+  read -r loaded <"$version_path" || return 0
+  [[ -n $loaded ]] || return 0
+  installed="$("$modinfo_command" -F version nvidia 2>/dev/null)" || return 0
+  installed=${installed%%$'\n'*}
+  [[ -n $installed && $installed != "$loaded" ]] || return 0
+
+  logger -t tsukuyomi-session -p user.warning -- \
+    "graphics driver was updated from $loaded to $installed; the computer must restart to finish the update" ||
+    true
+}
+
+# /etc/skel is seeded at install time; fallback checks remain self-contained.
+
+import_session_environment
+apply_panel_gpu_environment
+
+if needs_software_renderer; then
+  export LIBGL_ALWAYS_SOFTWARE=1
+  export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+  export GALLIUM_DRIVER=llvmpipe
+  export WLR_RENDERER_ALLOW_SOFTWARE=1
+fi
+
+warn_nvidia_driver_mismatch
+
+deadline="${TSUKUYOMI_SESSION_SETTLE_DEADLINE:-8}"
+start=$SECONDS
+waited=0
+foreground=0
+while pgrep -x weston >/dev/null 2>&1; do
+  if session_is_foreground; then
+    foreground=1
+    break
+  fi
+  (( SECONDS - start >= deadline )) && break
+  sleep 0.1
+  waited=1
+done
+# When Weston exited, give the kernel a beat to publish the DRM-master drop
+# before the compositor enumerates cards. A foreground transition already
+# revoked the greeter's device access and needs no extra settle delay.
+(( waited && ! foreground )) && sleep 0.3
+
+# SDDM discards a Wayland session's stdout but sends stderr to the configured
+# session log. Keep compositor diagnostics together there.
+default="${TSUKUYOMI_WAYLAND_SESSION_DEFAULT:-/usr/share/sddm/scripts/wayland-session}"
+child_pid=""
+forward_signal() {
+  local signal=$1
+  [[ -n $child_pid ]] && kill "-$signal" "$child_pid" 2>/dev/null || true
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+
+if [[ -x $default ]]; then
+  "$default" "$@" >&2 &
+else
+  "$@" >&2 &
+fi
+child_pid=$!
+
+while :; do
+  wait "$child_pid"
+  status=$?
+  kill -0 "$child_pid" 2>/dev/null && continue
+  break
+done
+trap - TERM INT HUP
+
+(( status == 0 )) && exit 0
+
+printf -v session_command '%q ' "$@"
+session_command=${session_command% }
+[[ -n $session_command ]] || session_command="<empty>"
+if (( status > 128 )); then
+  outcome="signal $((status - 128)) (status $status)"
+else
+  outcome="status $status"
+fi
+logger -t tsukuyomi-session -p user.err -- \
+  "session command $session_command exited with $outcome; returning to the login screen" ||
+  true
+
+# SDDM 0.21 treats 1 as an authentication error and leaves the stopped greeter
+# alone. Its session-error status is 2, which tears the display down and starts
+# a fresh greeter.
+exit 2

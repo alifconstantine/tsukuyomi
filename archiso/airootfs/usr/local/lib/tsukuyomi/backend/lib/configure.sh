@@ -98,7 +98,7 @@ tsukuyomi_cfg_initramfs() {
   if [[ -f $src ]]; then
     content=$(<"$src")
   else
-    content='HOOKS=(base udev plymouth keyboard autodetect microcode modconf kms keymap consolefont block encrypt resume filesystems fsck)'
+    content='HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont plymouth block encrypt resume filesystems fsck)'
   fi
   [[ ${TSUKUYOMI_ENCRYPT:-0} == 1 ]] || content=$(printf '%s\n' "$content" | sed -E '/^HOOKS=/ s/ encrypt\b//')
   run mkdir -p /mnt/etc/mkinitcpio.conf.d

@@ -11,13 +11,26 @@ tsukuyomi_deploy_desktop() {
   run arch-chroot /mnt chown -R "$user:$user" "/home/$user"
   run arch-chroot /mnt chmod 0700 "/home/$user"
 
-  if [[ -x /usr/local/bin/tsukuyomi-fetch ]]; then
-    run install -m 0755 /usr/local/bin/tsukuyomi-fetch /mnt/usr/local/bin/tsukuyomi-fetch
-  fi
-  if [[ -x /usr/local/bin/tsukuyomi-boot-apply ]]; then
-    run install -m 0755 /usr/local/bin/tsukuyomi-boot-apply /mnt/usr/local/bin/tsukuyomi-boot-apply
-  fi
+  local bin_name
+  for bin_name in \
+    tsukuyomi-fetch \
+    tsukuyomi-boot-apply \
+    tsukuyomi-lock \
+    tsukuyomi-greeter \
+    tsukuyomi-wayland-session \
+    tsukuyomi-greeter-guard; do
+    if [[ -x "/usr/local/bin/$bin_name" ]]; then
+      run install -m 0755 "/usr/local/bin/$bin_name" "/mnt/usr/local/bin/$bin_name"
+    fi
+  done
   run cp -a "$TSUKUYOMI_SHARE/." /mnt/usr/share/tsukuyomi/
+
+  if [[ -d "$TSUKUYOMI_SHARE/lockscreen" ]]; then
+    run find /mnt/usr/share/tsukuyomi/lockscreen -maxdepth 1 -type f \( -name '*.sh' -o -name 'tsukuyomi-lock' \) -exec chmod 0755 {} +
+    if [[ ! -x /mnt/usr/local/bin/tsukuyomi-lock && -f "$TSUKUYOMI_SHARE/lockscreen/tsukuyomi-lock" ]]; then
+      run install -m 0755 "$TSUKUYOMI_SHARE/lockscreen/tsukuyomi-lock" /mnt/usr/local/bin/tsukuyomi-lock
+    fi
+  fi
 
   # Plymouth theme + ShowDelay=0 so loading bar renders immediately on boot
   if [[ -d "$TSUKUYOMI_SHARE/boot/plymouth/tsukuyomi" ]]; then
@@ -30,15 +43,46 @@ Theme=tsukuyomi
 ShowDelay=0
 DeviceTimeout=8
 EOF
+    run chmod 0644 /mnt/etc/plymouth/plymouthd.conf
     run arch-chroot /mnt plymouth-set-default-theme tsukuyomi
   fi
 
-  # SDDM dark theme & config
+  # SDDM Wayland kiosk greeter + dark Tsukuyomi theme (Ryoku clockwork/orbital)
   if [[ -d "$TSUKUYOMI_SHARE/sddm/themes/tsukuyomi" ]]; then
-    log "configuring Tsukuyomi SDDM greeter (default session: Hyprland)"
-    run mkdir -p /mnt/etc/sddm.conf.d /mnt/usr/share/sddm/themes/tsukuyomi
+    log "configuring Tsukuyomi SDDM Wayland greeter (default session: Hyprland)"
+    run mkdir -p /mnt/etc/sddm.conf.d /mnt/usr/share/sddm/themes/tsukuyomi /mnt/etc/systemd/system
     run install -m 0644 "$TSUKUYOMI_SHARE/sddm/10-tsukuyomi.conf" /mnt/etc/sddm.conf.d/10-tsukuyomi.conf
     run cp -a "$TSUKUYOMI_SHARE/sddm/themes/tsukuyomi/." /mnt/usr/share/sddm/themes/tsukuyomi/
+    for bin_name in tsukuyomi-greeter tsukuyomi-wayland-session tsukuyomi-greeter-guard; do
+      if [[ ! -x "/mnt/usr/local/bin/$bin_name" && -f "$TSUKUYOMI_SHARE/sddm/$bin_name" ]]; then
+        run install -m 0755 "$TSUKUYOMI_SHARE/sddm/$bin_name" "/mnt/usr/local/bin/$bin_name"
+      fi
+    done
+    if [[ -f "$TSUKUYOMI_SHARE/sddm/tsukuyomi-greeter-guard.service" ]]; then
+      run install -m 0644 "$TSUKUYOMI_SHARE/sddm/tsukuyomi-greeter-guard.service" /mnt/etc/systemd/system/tsukuyomi-greeter-guard.service
+    fi
+
+    # Fallback cursor theme for SDDM weston kiosk / greeter surface
+    if [[ -n ${TSUKUYOMI_DRYRUN:-} || ! -f /mnt/usr/share/icons/default/index.theme ]]; then
+      run mkdir -p /mnt/usr/share/icons/default
+      write_file /mnt/usr/share/icons/default/index.theme <<'EOF'
+[Icon Theme]
+Inherits=Bibata-Modern-Classic
+EOF
+      run chmod 0644 /mnt/usr/share/icons/default/index.theme
+    fi
+
+    # Unlock gnome-keyring cleanly with login password via SDDM PAM
+    if [[ -f /mnt/etc/pam.d/sddm ]]; then
+      if ! grep -qE '^[[:space:]]*-?auth.*pam_gnome_keyring\.so' /mnt/etc/pam.d/sddm; then
+        run sed -i '/^[[:space:]]*auth[[:space:]].*include[[:space:]].*system-login/a auth optional pam_gnome_keyring.so' /mnt/etc/pam.d/sddm
+      fi
+      if ! grep -qE '^[[:space:]]*-?session.*pam_gnome_keyring\.so' /mnt/etc/pam.d/sddm; then
+        run sed -i '/^[[:space:]]*session[[:space:]].*include[[:space:]].*system-login/a session optional pam_gnome_keyring.so auto_start' /mnt/etc/pam.d/sddm
+      fi
+    elif [[ -n ${TSUKUYOMI_DRYRUN:-} ]]; then
+      log "(dry-run) wiring pam_gnome_keyring.so into /mnt/etc/pam.d/sddm"
+    fi
   fi
 
   # Carry live NetworkManager Wi-Fi connections into target
@@ -76,13 +120,19 @@ EOF
   # Point default web browser if one was selected
   tsukuyomi_set_default_browser "$user"
 
-  log "enabling target systemd services (sddm, NetworkManager, bluetooth, rtkit, power-profiles-daemon)"
-  run arch-chroot /mnt systemctl enable \
-    sddm.service \
-    NetworkManager.service \
-    bluetooth.service \
-    rtkit-daemon.service \
+  local -a enable_services=(
+    sddm.service
+    NetworkManager.service
+    bluetooth.service
+    rtkit-daemon.service
     power-profiles-daemon.service
+  )
+  if [[ -f /mnt/etc/systemd/system/tsukuyomi-greeter-guard.service || ( -n ${TSUKUYOMI_DRYRUN:-} && -f "$TSUKUYOMI_SHARE/sddm/tsukuyomi-greeter-guard.service" ) ]]; then
+    enable_services+=(tsukuyomi-greeter-guard.service)
+  fi
+  log "enabling target systemd services (%s)" "${enable_services[*]}"
+  run arch-chroot /mnt systemctl enable "${enable_services[@]}"
+  run arch-chroot /mnt systemctl set-default graphical.target
 
   run mkdir -p /mnt/etc/systemd/user/default.target.wants
   if [[ -n ${TSUKUYOMI_DRYRUN:-} || -f /mnt/usr/lib/systemd/user/ydotool.service ]]; then

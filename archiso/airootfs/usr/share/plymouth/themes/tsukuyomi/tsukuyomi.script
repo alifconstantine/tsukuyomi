@@ -1,14 +1,48 @@
 # Tsukuyomi Plymouth Theme Script
-# Minimal #000000 background with centered logo and crimson progress bar.
+# Pure #000000 framebuffer background with 月読 | TSUKUYOMI wordmark,
+# terminal-style status readout, crimson progress bar, and LUKS prompt.
 
 Window.SetBackgroundTopColor(0.0, 0.0, 0.0);
 Window.SetBackgroundBottomColor(0.0, 0.0, 0.0);
 
 logo.image = Image("logo.png");
 logo.sprite = Sprite(logo.image);
-logo.sprite.SetX(Window.GetWidth() / 2 - logo.image.GetWidth() / 2);
-logo.sprite.SetY(Window.GetHeight() / 2 - logo.image.GetHeight() / 2 - 24);
+logo_x = Window.GetWidth() / 2 - logo.image.GetWidth() / 2;
+logo_y = Window.GetHeight() / 2 - logo.image.GetHeight() - 28;
+if (logo_y < 36) logo_y = 36;
+logo.sprite.SetPosition(logo_x, logo_y, 10);
 logo.sprite.SetOpacity(1);
+
+initial_mode = Plymouth.GetMode();
+global.boot_cmd = "tsukuyomi@boot:~$ systemctl start graphical.target";
+global.status_text = "Initializing Tsukuyomi OS...";
+if (initial_mode == "shutdown")
+  {
+    global.boot_cmd = "tsukuyomi@boot:~$ systemctl poweroff";
+    global.status_text = "Shutting down Tsukuyomi OS...";
+  }
+else if (initial_mode == "reboot")
+  {
+    global.boot_cmd = "tsukuyomi@boot:~$ systemctl reboot";
+    global.status_text = "Rebooting Tsukuyomi OS...";
+  }
+else if (initial_mode == "resume")
+  {
+    global.boot_cmd = "tsukuyomi@boot:~$ systemctl start hibernate-resume";
+    global.status_text = "Resuming session...";
+  }
+
+prompt.image = Image.Text(global.boot_cmd, 0.788, 0.165, 0.165);
+prompt.sprite = Sprite(prompt.image);
+prompt.x = Window.GetWidth() / 2 - prompt.image.GetWidth() / 2;
+if (prompt.x < 24) prompt.x = 24;
+prompt.y = logo_y + logo.image.GetHeight() + 20;
+prompt.sprite.SetPosition(prompt.x, prompt.y, 10);
+
+status.sprite = Sprite();
+status.sprite.SetPosition(prompt.x, prompt.y + 34, 10);
+progress.sprite = Sprite();
+progress.sprite.SetPosition(prompt.x, prompt.y + 68, 10);
 
 global.fake_progress_limit = 0.78;
 global.fake_progress_duration = 12.0;
@@ -18,33 +52,85 @@ global.real_progress = 0.0;
 global.fake_progress_active = 0;
 global.animation_frame = 0;
 global.max_progress = 0.0;
+global.last_rendered_pct = -1;
+global.last_rendered_status = "";
 global.password_dialog_active = 0;
 global.password_check_pending = 0;
 global.password_error = 0;
 
-fun update_progress_bar(progress)
+fun set_prompt_text(cmd)
   {
-    if (progress > global.max_progress)
-      {
-        global.max_progress = progress;
-        width = Math.Int(progress_bar.original_image.GetWidth() * progress);
-        if (width < 2) width = 2;
+    prompt.image = Image.Text(cmd, 0.788, 0.165, 0.165);
+    prompt.sprite.SetImage(prompt.image);
+    prompt.x = Window.GetWidth() / 2 - prompt.image.GetWidth() / 2;
+    if (prompt.x < 24) prompt.x = 24;
+    prompt.sprite.SetPosition(prompt.x, prompt.y, 10);
+    status.sprite.SetPosition(prompt.x, prompt.y + 34, 10);
+    progress.sprite.SetPosition(prompt.x, prompt.y + 68, 10);
+  }
 
-        progress_bar.image = progress_bar.original_image.Scale(width, progress_bar.original_image.GetHeight());
-        progress_bar.sprite.SetImage(progress_bar.image);
+fun render_terminal_status()
+  {
+    if (global.status_text != global.last_rendered_status)
+      {
+        global.last_rendered_status = global.status_text;
+        status.image = Image.Text(global.status_text, 0.918, 0.886, 0.835);
+        status.sprite.SetImage(status.image);
+        status.sprite.SetPosition(prompt.x, prompt.y + 34, 10);
+      }
+  }
+
+fun render_terminal_progress(fraction)
+  {
+    pct = Math.Int(fraction * 100);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    if (pct == global.last_rendered_pct)
+      return;
+    global.last_rendered_pct = pct;
+
+    total_cells = 28;
+    filled = Math.Int((pct * total_cells) / 100);
+    bar = "[";
+    for (i = 0; i < total_cells; i++)
+      {
+        if (i < filled) bar += "#";
+        else bar += "-";
+      }
+    if (pct < 10)
+      bar += "]   " + pct + "%";
+    else if (pct < 100)
+      bar += "]  " + pct + "%";
+    else
+      bar += "] " + pct + "%";
+
+    progress.image = Image.Text(bar, 0.788, 0.165, 0.165);
+    progress.sprite.SetImage(progress.image);
+    progress.sprite.SetPosition(prompt.x, prompt.y + 68, 10);
+  }
+
+fun update_progress_bar(progress_val)
+  {
+    if (progress_val > global.max_progress)
+      {
+        global.max_progress = progress_val;
+        render_terminal_progress(progress_val);
       }
   }
 
 fun show_progress_bar()
   {
-    progress_box.sprite.SetOpacity(1);
-    progress_bar.sprite.SetOpacity(1);
+    prompt.sprite.SetOpacity(1);
+    status.sprite.SetOpacity(1);
+    progress.sprite.SetOpacity(1);
+    render_terminal_status();
+    render_terminal_progress(global.max_progress);
   }
 
 fun hide_progress_bar()
   {
-    progress_box.sprite.SetOpacity(0);
-    progress_bar.sprite.SetOpacity(0);
+    status.sprite.SetOpacity(0);
+    progress.sprite.SetOpacity(0);
   }
 
 fun start_fake_progress()
@@ -68,7 +154,7 @@ fun refresh_callback()
   {
     global.animation_frame++;
 
-    if (global.fake_progress_active == 1)
+    if (global.fake_progress_active == 1 && global.password_dialog_active == 0)
       {
         elapsed_time = global.animation_frame / 50.0;
         time_ratio = elapsed_time / global.fake_progress_duration;
@@ -91,12 +177,12 @@ bullet.image = Image("bullet.png");
 
 entry.sprite = Sprite(entry.image);
 entry.x = Window.GetWidth() / 2 - entry.image.GetWidth() / 2;
-entry.y = logo.sprite.GetY() + logo.image.GetHeight() + 34;
+entry.y = prompt.y + 42;
 entry.sprite.SetPosition(entry.x, entry.y, 10001);
 entry.sprite.SetOpacity(0);
 
-status.sprite = Sprite();
-status.sprite.SetOpacity(0);
+pwd_status.sprite = Sprite();
+pwd_status.sprite.SetOpacity(0);
 
 lock_height = entry.image.GetHeight() * 0.78;
 lock_scale = lock_height / 96;
@@ -114,19 +200,20 @@ bullet.sprites = [];
 fun update_password_status()
   {
     if (global.password_error == 1)
-      status.image = Image.Text("Wrong passphrase, try again", 0.85, 0.25, 0.25);
+      pwd_status.image = Image.Text("Wrong passphrase, try again", 0.878, 0.322, 0.322);
     else
-      status.image = Image.Text("Enter the disk passphrase", 0.55, 0.52, 0.48);
+      pwd_status.image = Image.Text("Enter the disk passphrase", 0.549, 0.522, 0.478);
 
-    status.sprite.SetImage(status.image);
-    status.x = Window.GetWidth() / 2 - status.image.GetWidth() / 2;
-    status.y = entry.y + entry.image.GetHeight() + 12;
-    status.sprite.SetPosition(status.x, status.y, 10001);
-    status.sprite.SetOpacity(1);
+    pwd_status.sprite.SetImage(pwd_status.image);
+    pwd_status.x = Window.GetWidth() / 2 - pwd_status.image.GetWidth() / 2;
+    pwd_status.y = entry.y + entry.image.GetHeight() + 12;
+    pwd_status.sprite.SetPosition(pwd_status.x, pwd_status.y, 10001);
+    pwd_status.sprite.SetOpacity(1);
   }
 
 fun show_password_dialog()
   {
+    set_prompt_text("tsukuyomi@boot:~$ cryptsetup open root");
     lock.sprite.SetOpacity(1);
     entry.sprite.SetOpacity(1);
   }
@@ -135,28 +222,13 @@ fun hide_password_dialog()
   {
     lock.sprite.SetOpacity(0);
     entry.sprite.SetOpacity(0);
-    status.sprite.SetOpacity(0);
+    pwd_status.sprite.SetOpacity(0);
     for (index = 0; bullet.sprites[index]; index++)
       bullet.sprites[index].SetOpacity(0);
+    set_prompt_text(global.boot_cmd);
   }
 
-#----------------------------------------- Progress Bar --------------------------------
-
-progress_box.image = Image("progress_box.png");
-progress_box.sprite = Sprite(progress_box.image);
-progress_box.x = Window.GetWidth() / 2 - progress_box.image.GetWidth() / 2;
-progress_box.y = logo.sprite.GetY() + logo.image.GetHeight() + 40;
-progress_box.sprite.SetPosition(progress_box.x, progress_box.y, 10);
-
-progress_bar.original_image = Image("progress_bar.png");
-progress_bar.image = progress_bar.original_image.Scale(2, progress_bar.original_image.GetHeight());
-progress_bar.sprite = Sprite(progress_bar.image);
-progress_bar.x = Window.GetWidth() / 2 - progress_bar.original_image.GetWidth() / 2;
-progress_bar.y = progress_box.y + (progress_box.image.GetHeight() - progress_bar.original_image.GetHeight()) / 2;
-progress_bar.sprite.SetPosition(progress_bar.x, progress_bar.y, 11);
-
-# Show progress bar immediately at boot/resume/shutdown unless LUKS prompts for a passphrase.
-initial_mode = Plymouth.GetMode();
+# Show terminal boot readout immediately at boot/resume/shutdown unless LUKS prompts.
 if (initial_mode == "boot" || initial_mode == "resume" || initial_mode == "shutdown" || initial_mode == "reboot")
   {
     show_progress_bar();
@@ -176,11 +248,13 @@ fun display_normal_callback()
       }
 
     hide_password_dialog();
+    global.last_rendered_status = "";
+    global.last_rendered_pct = -1;
     show_progress_bar();
     start_fake_progress();
   }
 
-fun display_password_callback(prompt, bullets)
+fun display_password_callback(prompt_str, bullets)
   {
     if (bullets == 0 && global.password_check_pending == 1)
       {
@@ -197,6 +271,7 @@ fun display_password_callback(prompt, bullets)
     global.max_progress = 0.0;
     global.fake_progress = 0.0;
     global.real_progress = 0.0;
+    global.last_rendered_pct = -1;
     show_password_dialog();
     update_password_status();
 
@@ -225,39 +300,50 @@ fun display_password_callback(prompt, bullets)
 Plymouth.SetDisplayNormalFunction(display_normal_callback);
 Plymouth.SetDisplayPasswordFunction(display_password_callback);
 
-fun progress_callback(duration, progress)
+fun progress_callback(duration, progress_val)
   {
-    global.real_progress = progress;
+    global.real_progress = progress_val;
 
-    if (progress > global.fake_progress_limit)
+    if (progress_val > global.fake_progress_limit)
       {
         stop_fake_progress();
-        update_progress_bar(progress);
+        update_progress_bar(progress_val);
       }
   }
 
 Plymouth.SetBootProgressFunction(progress_callback);
 
+fun update_status_callback(text)
+  {
+    if (global.password_dialog_active == 0 && text != "")
+      {
+        global.status_text = text;
+        render_terminal_status();
+      }
+  }
+
+Plymouth.SetUpdateStatusFunction(update_status_callback);
+
 fun quit_callback()
   {
+    stop_fake_progress();
+    update_progress_bar(1.0);
     logo.sprite.SetOpacity(1);
   }
 
 Plymouth.SetQuitFunction(quit_callback);
 
-message_sprite = Sprite();
-message_sprite.SetPosition(10, 10, 10000);
-
 fun display_message_callback(text)
   {
-    my_image = Image.Text(text, 0.92, 0.89, 0.84);
-    message_sprite.SetImage(my_image);
-    message_sprite.SetOpacity(1);
+    if (global.password_dialog_active == 0 && text != "")
+      {
+        global.status_text = text;
+        render_terminal_status();
+      }
   }
 
 fun hide_message_callback(text)
   {
-    message_sprite.SetOpacity(0);
   }
 
 Plymouth.SetDisplayMessageFunction(display_message_callback);

@@ -1,0 +1,13 @@
+[Unit]
+Description=Tsukuyomi login screen guard (restarts SDDM when its greeter is gone)
+After=display-manager.service
+Wants=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tsukuyomi-greeter-guard
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target
