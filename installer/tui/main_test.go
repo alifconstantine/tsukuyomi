@@ -152,3 +152,18 @@ func TestDoneExitActions(t *testing.T) {
 		t.Fatalf("expected dry-run not to execute reboot, got %v", calls)
 	}
 }
+
+func TestInstallLogKeepsLatestErrorVisible(t *testing.T) {
+	m := model{
+		stageIdx:   4,
+		installLog: []string{strings.Repeat("long output ", 50), "pacman: disk is full"},
+		installErr: "exit status 1",
+	}
+	view := m.viewInstall(44, 17)
+	if strings.Count(view, "\n") >= 17 {
+		t.Fatalf("install log exceeds available rows:\n%s", view)
+	}
+	if !strings.Contains(view, "pacman: disk is full") || !strings.Contains(view, "Installation failed") {
+		t.Fatalf("latest error missing from install log:\n%s", view)
+	}
+}

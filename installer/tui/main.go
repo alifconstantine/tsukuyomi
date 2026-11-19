@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/sahilm/fuzzy"
 )
 
@@ -167,6 +169,9 @@ type model struct {
 	// Install & done
 	istream    *installStream
 	stageIdx   int
+	stageStart time.Time
+	stageTime  time.Duration
+	cacheBytes int64
 	installLog []string
 	installErr string
 	abortArmed bool
@@ -230,6 +235,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, introTickCmd()
+	case installTickMsg:
+		if m.state != stepInstall || m.installErr != "" || msg.stream != m.istream {
+			return m, nil
+		}
+		m.stageTime = msg.now.Sub(m.stageStart).Truncate(time.Second)
+		m.cacheBytes = msg.bytes
+		return m, installTick(m.istream, !m.dryRun && installStages[m.stageIdx].id == "pacstrap")
 	case installLineMsg:
 		line := string(msg)
 		if strings.HasPrefix(line, "@@TSUKUYOMI_STEP ") {
@@ -237,6 +249,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for i, st := range installStages {
 				if st.id == id {
 					m.stageIdx = i
+					m.stageStart = time.Now()
+					m.stageTime = 0
+					m.cacheBytes = 0
 					break
 				}
 			}
@@ -654,11 +669,14 @@ func (m model) keyReview(k string) (tea.Model, tea.Cmd) {
 		}
 		m.state = stepInstall
 		m.stageIdx = 0
+		m.stageStart = time.Now()
+		m.stageTime = 0
+		m.cacheBytes = 0
 		m.installLog = nil
 		m.installErr = ""
 		st, cmd := startInstall(m)
 		m.istream = st
-		return m, cmd
+		return m, tea.Batch(cmd, installTick(st, false))
 	default:
 		editText(&m.confirmText, k)
 	}
@@ -963,7 +981,7 @@ func (m model) renderBody(innerW, maxH int) string {
 	case stepReview:
 		out = m.viewReview()
 	case stepInstall:
-		out = m.viewInstall(maxH - 4)
+		out = m.viewInstall(innerW, maxH-4)
 	case stepDone:
 		out = m.viewDone()
 	}
@@ -1199,7 +1217,7 @@ func (m model) viewReview() string {
 	return strings.Join(lines, "\n")
 }
 
-func (m model) viewInstall(availH int) string {
+func (m model) viewInstall(availW, availH int) string {
 	var stageRows []string
 	for i, st := range installStages {
 		switch {
@@ -1211,17 +1229,32 @@ func (m model) viewInstall(availH int) string {
 			stageRows = append(stageRows, fg(cMuted, "  [  ] "+st.label))
 		}
 	}
-	logLines := m.installLog
-	maxLog := max(availH-len(stageRows)-3, 4)
-	if len(logLines) > maxLog {
-		logLines = logLines[len(logLines)-maxLog:]
+	status := "Stage time " + m.stageTime.String()
+	if m.cacheBytes > 0 && installStages[m.stageIdx].id == "pacstrap" {
+		status += fmt.Sprintf(" · %.0f MiB in download cache", float64(m.cacheBytes)/(1<<20))
 	}
-	out := strings.Join(stageRows, "\n") + "\n\n" + boldFg(cMuted, "Log:") + "\n" + fg(cMuted, strings.Join(logLines, "\n"))
+	var notice string
 	if m.installErr != "" {
-		out += "\n\n" + boldFg(cErr, "Installation failed: "+m.installErr+" (press Enter to return)")
+		notice = boldFg(cErr, "Installation failed: "+m.installErr+" (press Enter to return)")
 	} else if m.abortArmed && time.Since(m.abortAt) <= 3*time.Second {
-		out += "\n\n" + boldFg(cAmber, "Press Ctrl+C again within 3s to abort installation")
+		notice = boldFg(cAmber, "Press Ctrl+C again within 3s to abort installation")
 	}
+	if notice != "" {
+		notice = "\n" + ansi.Truncate(notice, availW, "…")
+	}
+
+	// Fit recent output by rendered rows so a long pacman line can't hide the latest error.
+	maxLog := max(availH-len(stageRows)-3-strings.Count(notice, "\n"), 1)
+	var logRows []string
+	for i := len(m.installLog) - 1; i >= 0 && len(logRows) < maxLog; i-- {
+		rows := strings.Split(ansi.Hardwrap(m.installLog[i], availW, true), "\n")
+		for j := len(rows) - 1; j >= 0 && len(logRows) < maxLog; j-- {
+			logRows = append(logRows, rows[j])
+		}
+	}
+	slices.Reverse(logRows)
+	out := strings.Join(stageRows, "\n") + "\n" + fg(cMuted, status) + "\n\n" +
+		fg(cMuted, strings.Join(logRows, "\n")) + notice
 	return out
 }
 

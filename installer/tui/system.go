@@ -15,6 +15,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type sysSnapshot struct {
@@ -40,6 +41,29 @@ type wifiNet struct {
 }
 
 type installLineMsg string
+
+type installTickMsg struct {
+	stream *installStream
+	now    time.Time
+	bytes  int64
+}
+
+func installTick(stream *installStream, readCache bool) tea.Cmd {
+	return tea.Tick(time.Second, func(now time.Time) tea.Msg {
+		var bytes int64
+		if readCache {
+			_ = filepath.WalkDir("/mnt/var/cache/pacman/pkg", func(path string, entry os.DirEntry, err error) error {
+				if err == nil && entry.Type().IsRegular() && strings.Contains(entry.Name(), ".pkg.tar.") && !strings.HasSuffix(entry.Name(), ".sig") {
+					if info, err := entry.Info(); err == nil {
+						bytes += info.Size()
+					}
+				}
+				return nil
+			})
+		}
+		return installTickMsg{stream: stream, now: now, bytes: bytes}
+	})
+}
 
 type installDoneMsg struct {
 	err error
@@ -409,11 +433,12 @@ func startInstall(m model) (*installStream, tea.Cmd) {
 
 	go func() {
 		defer close(s.lines)
+		defer pr.Close()
 		sc := bufio.NewScanner(pr)
 		buf := make([]byte, 0, 64*1024)
 		sc.Buffer(buf, 1024*1024)
 		for sc.Scan() {
-			s.lines <- sc.Text()
+			s.lines <- ansi.Strip(sc.Text())
 		}
 	}()
 
