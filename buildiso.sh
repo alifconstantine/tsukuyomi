@@ -16,10 +16,12 @@ clean_first=true
 verbose=false
 build_in_ram=false
 remove_build_dir=false
+online_only=false
 
 usage() {
     echo "Usage: ${0##*/} [options]"
     echo '    -c                 Disable clean work dir'
+    echo '    -n                 Build a smaller ISO that uses online package mirrors'
     echo '    -r                 Enable building in RAM on systems with >23GB RAM'
     echo '    -w                 Remove build directory after ISO is built'
     echo "    -p <profile>       Profile [default: ${build_list_iso}]"
@@ -28,10 +30,11 @@ usage() {
     exit "${1:-0}"
 }
 
-opts='p:cvhrw'
+opts='p:cnvhrw'
 while getopts "${opts}" arg; do
     case "${arg}" in
         c) clean_first=false ;;
+        n) online_only=true ;;
         p) build_list_iso="$OPTARG" ;;
         r) build_in_ram=true ;;
         w) remove_build_dir=true ;;

@@ -48,4 +48,8 @@ done < <(
     -type f \( -perm -111 -o -name '*.sh' -o -name '*.py' \) \
     -print0 2>/dev/null
 )
+# The Python venv uses the interpreter bundled with the end-4 wheelhouse.
+while IFS= read -r -d '' _tsukuyomi_exec; do
+  file_permissions["/${_tsukuyomi_exec#airootfs/}"]="0:0:755"
+done < <(find airootfs/usr/share/tsukuyomi/shell/python -type f -perm -111 -print0 2>/dev/null)
 unset _tsukuyomi_exec

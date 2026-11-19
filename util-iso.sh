@@ -78,13 +78,21 @@ prepare_profile() {
     local _iso_version
     _iso_version="$(date +%y%m%d)"
 
-    # Sync tsukuyomi-shell + Tsukuyomi assets + compiled TUI into airootfs
-    if [[ -x "${src_dir}/../scripts/sync-to-iso.sh" ]]; then
-        if (( EUID == 0 )) && [[ -n ${SUDO_USER:-} ]]; then
-            runuser -u "$SUDO_USER" -- "${src_dir}/../scripts/sync-to-iso.sh"
-        else
-            "${src_dir}/../scripts/sync-to-iso.sh"
+    # Prepare the target payload before mkarchiso starts. Sudo users build the
+    # custom packages and sync as their unprivileged account.
+    local workspace_scripts="${src_dir}/../scripts"
+    local -a as_builder=()
+    if (( EUID == 0 )) && [[ -n ${SUDO_USER:-} ]]; then
+        as_builder=(runuser -u "$SUDO_USER" --)
+    fi
+    if [[ -x "$workspace_scripts/sync-to-iso.sh" ]]; then
+        "${as_builder[@]}" "$workspace_scripts/sync-to-iso.sh" --manifests-only
+        if ! $online_only; then
+            "${as_builder[@]}" "$workspace_scripts/build-end4-repo.sh" --with-offline
         fi
+        "${as_builder[@]}" env TSUKUYOMI_ONLINE_ONLY="$online_only" "$workspace_scripts/sync-to-iso.sh" --keep-manifests
+    elif ! $online_only; then
+        die "Offline ISO requires the tsukuyomi-os workspace with tsukuyomi-shell. Use -n to build an online ISO from this checkout."
     fi
 
     fetch_cachyos_mirrorlist
@@ -129,7 +137,11 @@ run_build() {
 
     msg2 "Copying archiso profile into ${work_dir}"
     mkdir -p "${work_dir}"
-    cp -a "${src_dir}/archiso" "${work_dir}/archiso"
+    cp -a --reflink=auto "${src_dir}/archiso" "${work_dir}/archiso"
+    if $online_only; then
+        rm -rf -- "${work_dir}/archiso/airootfs/usr/share/tsukuyomi/offline" \
+            "${work_dir}/archiso/airootfs/usr/share/tsukuyomi/shell/python"
+    fi
 
     msg "Start [Build ISO]"
 

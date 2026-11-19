@@ -1,42 +1,19 @@
-These are the basic needed files and folders to build CachyOS system.
+# Tsukuyomi OS ISO
 
-### buildiso
+Use the full `tsukuyomi-os` workspace with the sibling `tsukuyomi-shell` and `scripts` directories to build the offline installer. The build host needs Arch/CachyOS, archiso, Go, fakeroot, uv, the Arch and CachyOS keyrings, and the D-Bus, Cairo, and GObject Introspection development libraries for the Python wheels.
 
-buildiso is used to build CachyOS ISO.
-
-#### Arguments
-
-~~~
-$ ./buildiso.sh -h
-Usage: buildiso [options]
-    -c                 Disable clean work dir
-    -r                 Disable building in RAM on systems with more than 23GB RAM
-    -w                 Remove build directory (not the ISO) after ISO file is built
-    -h                 This help
-    -p <profile>       Buildset or profile [default: desktop]
-    -v                 Verbose output to log file, show profile detail (-q)
-~~~
-
-* Uses the same signature that normal repo and has no mirrors package to install.
+Run from this repository:
 
 ```bash
-sudo pacman -Syy
+./buildiso.sh
 ```
 
-### Install necessary packages:
+The build downloads and verifies the target packages, then embeds them with the custom end-4 packages and Python 3.12 runtime. During installation, pacstrap reads the packages directly from the ISO.
+
+For a smaller installer that fetches system packages from mirrors, or a build from this repository alone:
+
 ```bash
-sudo pacman -S archiso mkinitcpio-archiso git squashfs-tools grub --needed
+./buildiso.sh -n
 ```
 
-### Clone:
-```bash
-git clone https://github.com/cachyos/cachyos-live-iso.git cachyos-archiso
-cd cachyos-archiso
-```
-
-### Build
-```bash
-sudo ./buildiso.sh -p desktop -v -w
-```
-
-As the result iso appears at the `out` folder
+Find the ISO and SHA-256 checksum in `out/tsukuyomi/`. Run `./testiso.sh` to boot the ISO in QEMU with a disposable virtual disk.

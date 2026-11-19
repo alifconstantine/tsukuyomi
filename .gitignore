@@ -27,6 +27,9 @@ repo/x86_64/*.files*
 repo/offline/
 repo/offline-cache/
 repo/uv-wheels/
+repo/end4-python/
+repo/.end4-python.*/
 archiso/airootfs/usr/share/tsukuyomi/repo/
 archiso/airootfs/usr/share/tsukuyomi/offline/
 archiso/airootfs/usr/share/tsukuyomi/shell/wheels/
+archiso/airootfs/usr/share/tsukuyomi/shell/python/

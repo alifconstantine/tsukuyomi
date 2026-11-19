@@ -54,7 +54,7 @@ jobs:
       - name: Build ISO (${{ steps.date.outputs.builddate }})
         id: build
         run: |
-          sudo -H -E -u builder ./buildiso.sh
+          sudo -H -E -u builder ./buildiso.sh -n
 
       - name: Upload ISO to artifacts
         id: upload
