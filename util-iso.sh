@@ -94,6 +94,14 @@ prepare_profile() {
     elif ! $online_only; then
         die "Offline ISO requires the tsukuyomi-os workspace with tsukuyomi-shell. Use -n to build an online ISO from this checkout."
     fi
+    if ! $online_only; then
+        local payload="${src_dir}/archiso/airootfs/usr/share/tsukuyomi"
+        [[ -f "$payload/offline/repo/tsukuyomi-offline.db" \
+            && -f "$payload/repo/x86_64/tsukuyomi-local.db" \
+            && -x "$payload/shell/python/bin/python3.12" ]] \
+            && compgen -G "$payload/shell/wheels/*.whl" >/dev/null \
+            || die "The offline package repositories and end-4 Python runtime must be staged before building the ISO."
+    fi
 
     fetch_cachyos_mirrorlist
 
