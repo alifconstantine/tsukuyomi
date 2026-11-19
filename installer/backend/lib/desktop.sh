@@ -234,9 +234,9 @@ tsukuyomi_seed_end4_defaults() {
       " || log "warning: gsettings default setup skipped"
   fi
 
-  local init_wall="/home/$user/Pictures/Wallpapers/default_wallpaper.png"
+  local init_wall="/home/$user/Pictures/Wallpapers/default_wallpaper.webp"
   if [[ -z ${TSUKUYOMI_DRYRUN:-} && ! -f "/mnt$init_wall" ]]; then
-    init_wall="/home/$user/.config/quickshell/ii/assets/images/default_wallpaper.png"
+    init_wall="/home/$user/.config/quickshell/ii/assets/images/default_wallpaper.webp"
   fi
 
   if [[ -n ${TSUKUYOMI_DRYRUN:-} || -f "/mnt$init_wall" ]]; then
