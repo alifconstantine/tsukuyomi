@@ -117,7 +117,6 @@ tsukuyomi_bootloader() {
 }
 
 tsukuyomi_finalize() {
-  tsukuyomi_hooks_restore
   log "unmounting target filesystems cleanly"
   tsukuyomi_cleanup_mounts
 }

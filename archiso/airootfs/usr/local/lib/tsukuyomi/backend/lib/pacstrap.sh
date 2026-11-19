@@ -49,133 +49,152 @@ tsukuyomi_ensure_keyring() {
   fi
 }
 
-TSUKUYOMI_MASKED_HOOKS=(05-snap-pac-pre.hook zz-snap-pac-post.hook 80-limine-efi-deploy.hook)
-
+# Pacman uses absolute --hookdir paths, and the last directory takes precedence.
+# Keep masks outside the target so pacstrap can unpack the packaged hooks.
 tsukuyomi_hooks_quiet() {
-  run mkdir -p /mnt/etc/pacman.d/hooks
-  local h
-  for h in "${TSUKUYOMI_MASKED_HOOKS[@]}"; do
-    run ln -sf /dev/null "/mnt/etc/pacman.d/hooks/$h"
+  local directory=$1 hook
+  run mkdir -p "$directory" /mnt/etc/pacman.d/hooks
+  for hook in 05-snap-pac-pre.hook zz-snap-pac-post.hook 80-limine-efi-deploy.hook 90-mkinitcpio-install.hook; do
+    run ln -s /dev/null "$directory/$hook"
   done
 }
 
-tsukuyomi_hooks_restore() {
-  local h p
-  for h in "${TSUKUYOMI_MASKED_HOOKS[@]}"; do
-    p="/mnt/etc/pacman.d/hooks/$h"
-    if [[ -n ${TSUKUYOMI_DRYRUN:-} || -L $p ]]; then
-      run rm -f "$p"
-    fi
-  done
+# Build and install use the same package selection, including explicit driver profiles.
+tsukuyomi_collect_packages() {
+  local pkg_dir=$1 browser=$2 sec
+  shift 2
+  {
+    cat "$pkg_dir/base.packages" "$pkg_dir/end4-repo.packages"
+    for sec in "$@"; do
+      read_pkg_section "$pkg_dir/hardware.packages" "$sec"
+    done
+    [[ -z $browser || $browser == none ]] || printf '%s\n' "$browser"
+  } | awk '{ sub(/#.*/, ""); gsub(/[[:space:]]/, ""); if (length && !seen[$0]++) print }'
 }
 
+tsukuyomi_add_file_repo() {
+  printf '\n[%s]\nSigLevel = Never\nServer = file://%s\n' "$1" "$2"
+}
+
+tsukuyomi_offline_config() {
+  printf '[options]\nArchitecture = auto\nParallelDownloads = 8\nSigLevel = Never\n'
+  tsukuyomi_add_file_repo tsukuyomi-offline "$1"
+  if [[ -n ${2:-} ]]; then
+    tsukuyomi_add_file_repo tsukuyomi-local "$2"
+  fi
+}
+
+# Resolve against a fresh local database and check every archive before partitioning.
+tsukuyomi_verify_baked_transaction() {
+  local config=$1 db=$2
+  shift 2
+  local archive plan
+  plan=$(pacman --config "$config" --dbpath "$db" -Sp --print-format '%l' --noconfirm "$@") || return 1
+  [[ -n $plan ]] || return 1
+  while IFS= read -r archive; do
+    [[ $archive == file://* && -s ${archive#file://} ]] || {
+      printf 'Missing bundled package: %s\n' "$archive" >&2
+      return 1
+    }
+  done <<<"$plan"
+}
+
+TSUKUYOMI_PKG_WORK=""
 TSUKUYOMI_OFFLINE_REPO=""
-TSUKUYOMI_OFFLINE_CONF=""
+TSUKUYOMI_LOCAL_REPO=""
+TSUKUYOMI_TARGET_PACKAGES=()
 
-tsukuyomi_offline_active() {
-  [[ -n ${TSUKUYOMI_OFFLINE_REPO:-} && -f "$TSUKUYOMI_OFFLINE_REPO/tsukuyomi-offline.db.tar.gz" ]]
-}
+tsukuyomi_packages_prepare() {
+  local pkg_dir="$TSUKUYOMI_SHARE/packages" sections packages
+  local -a hw_sections
+  sections=$(tsukuyomi_detect_hw_sections) || return 1
+  mapfile -t hw_sections <<<"$sections"
+  local manifest
+  for manifest in base.packages end4-repo.packages hardware.packages; do
+    [[ -r "$pkg_dir/$manifest" ]] || die "missing package list: %s" "$pkg_dir/$manifest"
+  done
+  packages=$(tsukuyomi_collect_packages "$pkg_dir" "${TSUKUYOMI_BROWSER:-none}" "${hw_sections[@]}")
+  mapfile -t TSUKUYOMI_TARGET_PACKAGES <<<"$packages"
 
-tsukuyomi_offline_prepare() {
-  local cand="$TSUKUYOMI_SHARE/offline/repo"
-  [[ -f "$cand/tsukuyomi-offline.db.tar.gz" ]] || return 0
-  TSUKUYOMI_OFFLINE_REPO="$cand"
-  TSUKUYOMI_OFFLINE_CONF="/tmp/tsukuyomi-offline-pacman.conf"
   if [[ -n ${TSUKUYOMI_DRYRUN:-} ]]; then
-    log "offline: would configure [tsukuyomi-offline] -> file://%s" "$cand"
     return 0
   fi
-  cat >"$TSUKUYOMI_OFFLINE_CONF" <<EOF
-[options]
-Architecture = auto
-HoldPkg     = pacman glibc
-ParallelDownloads = 8
-SigLevel    = Never
-LocalFileSigLevel = Never
 
-[tsukuyomi-offline]
-SigLevel = Never
-Server = file://$cand
-EOF
-  log "offline: using baked [tsukuyomi-offline] repository at %s" "$cand"
+  TSUKUYOMI_PKG_WORK=$(mktemp -d)
+  local offline="$TSUKUYOMI_SHARE/offline/repo"
+  local custom="$TSUKUYOMI_SHARE/repo/x86_64"
+  if [[ -d $custom ]]; then
+    [[ -f "$custom/tsukuyomi-local.db" && -r "$pkg_dir/end4-aur.packages" ]] ||
+      die "bundled custom package repository is incomplete; rebuild the ISO"
+    TSUKUYOMI_LOCAL_REPO=$custom
+    mapfile -t -O "${#TSUKUYOMI_TARGET_PACKAGES[@]}" TSUKUYOMI_TARGET_PACKAGES < <(
+      awk 'NF && !/^#/ { print "tsukuyomi-local/" $1 }' "$pkg_dir/end4-aur.packages"
+    )
+  fi
+  if [[ -d $offline ]]; then
+    [[ -f "$offline/tsukuyomi-offline.db" && -n $TSUKUYOMI_LOCAL_REPO ]] ||
+      die "bundled offline repository is incomplete; rebuild the ISO"
+    TSUKUYOMI_OFFLINE_REPO=$offline
+    log "checking bundled packages for this hardware and browser"
+    tsukuyomi_offline_config "$offline" "$TSUKUYOMI_LOCAL_REPO" >"$TSUKUYOMI_PKG_WORK/pacman.conf"
+    mkdir "$TSUKUYOMI_PKG_WORK/db"
+    pacman --config "$TSUKUYOMI_PKG_WORK/pacman.conf" --dbpath "$TSUKUYOMI_PKG_WORK/db" \
+      --disable-sandbox -Sy --noconfirm
+    tsukuyomi_verify_baked_transaction "$TSUKUYOMI_PKG_WORK/pacman.conf" "$TSUKUYOMI_PKG_WORK/db" \
+      "${TSUKUYOMI_TARGET_PACKAGES[@]}" ||
+      die "bundled package set is incomplete for this selection; rebuild the ISO"
+  fi
 }
 
-tsukuyomi_pacstrap_with_retry() {
-  local -a pkgs=("$@")
-
-  if tsukuyomi_offline_active; then
-    if run pacstrap -C "$TSUKUYOMI_OFFLINE_CONF" -K /mnt --noconfirm "${pkgs[@]}"; then
-      [[ -f /etc/pacman.conf ]] && run install -m 0644 /etc/pacman.conf /mnt/etc/pacman.conf
-      return 0
+tsukuyomi_pacstrap_online() {
+  local config=$1
+  shift
+  if [[ -z ${TSUKUYOMI_DRYRUN:-} ]]; then
+    cp /etc/pacman.conf "$config" || return 1
+    if [[ -n $TSUKUYOMI_LOCAL_REPO ]]; then
+      tsukuyomi_add_file_repo tsukuyomi-local "$TSUKUYOMI_LOCAL_REPO" >>"$config" || return 1
     fi
-    log "offline pacstrap failed; falling back to online mirrors"
-    TSUKUYOMI_OFFLINE_REPO=""
-    TSUKUYOMI_OFFLINE_CONF=""
-    tsukuyomi_rank_mirrors
   fi
-
-  if run pacstrap -K -P /mnt --noconfirm "${pkgs[@]}"; then
-    return 0
-  fi
-
-  log "pacstrap failed (mirror reset or transient TLS drop); cleaning partial cache, switching mirror tier, and retrying with --needed"
-  run_sh 'rm -f /mnt/var/cache/pacman/pkg/*.part 2>/dev/null || true'
-  tsukuyomi_mirrors_fallback || true
-
-  if run pacstrap -K -P /mnt --noconfirm --needed --overwrite '*' "${pkgs[@]}"; then
-    return 0
-  fi
-
-  log "retrying pacstrap once more with sequential downloads (ParallelDownloads=1)"
-  tsukuyomi_tune_pacman_downloads 1
-  run_sh 'rm -f /mnt/var/cache/pacman/pkg/*.part 2>/dev/null || true'
-  run pacstrap -K -P /mnt --noconfirm --needed --overwrite '*' "${pkgs[@]}"
+  run pacstrap -C "$config" -K /mnt --noconfirm "$@"
 }
 
 tsukuyomi_pacstrap() {
-  local base_file="$TSUKUYOMI_SHARE/packages/base.packages"
-  local hw_file="$TSUKUYOMI_SHARE/packages/hardware.packages"
-  local end4_file="$TSUKUYOMI_SHARE/packages/end4-repo.packages"
+  local config="${TSUKUYOMI_PKG_WORK:-/tmp}/pacman.conf"
+  local hooks="${TSUKUYOMI_PKG_WORK:-/tmp/tsukuyomi-dryrun}/hooks"
+  local -a options=(--hookdir /mnt/etc/pacman.d/hooks --hookdir "$hooks")
+  tsukuyomi_hooks_quiet "$hooks"
 
-  [[ -f $base_file ]] || die "missing package list: %s" "$base_file"
-  [[ -f $end4_file ]] || die "missing package list: %s" "$end4_file"
-
-  local -a pkgs=()
-  mapfile -t pkgs < <(grep -vE '^[[:space:]]*(#|$)' "$base_file")
-
-  local sec
-  while IFS= read -r sec; do
-    [[ -n $sec && -f $hw_file ]] || continue
-    mapfile -t -O "${#pkgs[@]}" pkgs < <(read_pkg_section "$hw_file" "$sec")
-  done < <(tsukuyomi_detect_hw_sections)
-
-  mapfile -t -O "${#pkgs[@]}" pkgs < <(grep -vE '^[[:space:]]*(#|$)' "$end4_file")
-
-  if [[ -n ${TSUKUYOMI_BROWSER:-} && ${TSUKUYOMI_BROWSER:-none} != none ]]; then
-    pkgs+=("$TSUKUYOMI_BROWSER")
+  if [[ -n $TSUKUYOMI_LOCAL_REPO ]]; then
+    options+=(--cachedir "$TSUKUYOMI_LOCAL_REPO")
   fi
 
-  local -a unique_pkgs=()
-  local -A seen=()
-  local p
-  for p in "${pkgs[@]}"; do
-    p=${p%%#*}
-    p=${p// /}
-    [[ -n $p && -z ${seen[$p]+x} ]] || continue
-    seen[$p]=1
-    unique_pkgs+=("$p")
-  done
-
-  tsukuyomi_ensure_keyring
-  tsukuyomi_hooks_quiet
-  tsukuyomi_offline_prepare
-  if ! tsukuyomi_offline_active; then
+  if [[ -n $TSUKUYOMI_OFFLINE_REPO ]]; then
+    log "installing %d package targets from the ISO" "${#TSUKUYOMI_TARGET_PACKAGES[@]}"
+    # Pacman reads the archives directly off the ISO, without a second disk copy.
+    run pacstrap -C "$config" -K /mnt --noconfirm --cachedir "$TSUKUYOMI_OFFLINE_REPO" \
+      "${options[@]}" "${TSUKUYOMI_TARGET_PACKAGES[@]}" ||
+      die "installation from the ISO failed; see the pacman error above"
+  else
+    tsukuyomi_ensure_keyring
     tsukuyomi_rank_mirrors
+    log "installing %d package targets from online repositories" "${#TSUKUYOMI_TARGET_PACKAGES[@]}"
+    if ! tsukuyomi_pacstrap_online "$config" "${options[@]}" "${TSUKUYOMI_TARGET_PACKAGES[@]}"; then
+      log "pacstrap failed; retrying with alternate mirrors and keeping the download cache"
+      tsukuyomi_mirrors_fallback || true
+      tsukuyomi_pacstrap_online "$config" --needed "${options[@]}" "${TSUKUYOMI_TARGET_PACKAGES[@]}" ||
+        die "package installation failed after retry; see the pacman error above"
+    fi
   fi
 
-  log "pacstrapping %d packages into /mnt" "${#unique_pkgs[@]}"
-  tsukuyomi_pacstrap_with_retry "${unique_pkgs[@]}"
-
+  # The installed OS always uses the normal update repositories.
+  run install -m 0644 /etc/pacman.conf /mnt/etc/pacman.conf
+  run install -m 0644 /etc/pacman.d/cachyos-mirrorlist /mnt/etc/pacman.d/cachyos-mirrorlist
+  if [[ -n $TSUKUYOMI_OFFLINE_REPO ]]; then
+    run rm -f /mnt/var/lib/pacman/sync/tsukuyomi-offline.db
+  fi
+  if [[ -n $TSUKUYOMI_LOCAL_REPO ]]; then
+    run rm -f /mnt/var/lib/pacman/sync/tsukuyomi-local.db
+  fi
   log "writing /etc/fstab"
   run_sh "genfstab -U /mnt >> /mnt/etc/fstab"
 }

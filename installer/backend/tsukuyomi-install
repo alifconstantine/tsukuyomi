@@ -48,13 +48,28 @@ source "$LIB_DIR/bootloader.sh"
 : "${TSUKUYOMI_SHARE:=/usr/share/tsukuyomi}"
 : "${TSUKUYOMI_DRYRUN:=}"
 
-trap 'tsukuyomi_cleanup_on_err $?' ERR
+install_active=0
+cleanup() {
+  local status=$1
+  if (( status != 0 && install_active == 1 )); then
+    tsukuyomi_cleanup_mounts
+  fi
+  if [[ -n $TSUKUYOMI_PKG_WORK ]]; then
+    rm -rf -- "$TSUKUYOMI_PKG_WORK"
+  fi
+}
+trap 'cleanup $?' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 main() {
   step preflight
   tsukuyomi_preflight
+  tsukuyomi_packages_prepare
 
   step disk
+  install_active=1
+  tsukuyomi_cleanup_mounts
   tsukuyomi_partition_whole
 
   step luks

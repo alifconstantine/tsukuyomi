@@ -30,7 +30,8 @@ tsukuyomi_deploy_desktop() {
   else
     local share_item
     for share_item in "$TSUKUYOMI_SHARE"/*; do
-      [[ -e $share_item && $(basename "$share_item") != "offline" ]] || continue
+      [[ -e $share_item ]] || continue
+      case ${share_item##*/} in offline|repo) continue ;; esac
       run cp -a "$share_item" /mnt/usr/share/tsukuyomi/
     done
   fi
@@ -123,12 +124,18 @@ EOF
   if [[ -f "$TSUKUYOMI_SHARE/shell/requirements.txt" ]] && chroot_has uv; then
     log "setting up end-4 Quickshell Python environment (.venv)"
     local uv_wheel_flags=""
+    local uv_network_flags=""
+    local python="3.12"
+    if [[ -x /mnt/usr/share/tsukuyomi/shell/python/bin/python3.12 ]]; then
+      python="/usr/share/tsukuyomi/shell/python/bin/python3.12"
+    fi
+    [[ -z $TSUKUYOMI_OFFLINE_REPO ]] || uv_network_flags="--offline"
     if [[ -d /mnt/usr/share/tsukuyomi/shell/wheels ]] && compgen -G "/mnt/usr/share/tsukuyomi/shell/wheels/*.whl" >/dev/null; then
       uv_wheel_flags="--no-index --find-links /usr/share/tsukuyomi/shell/wheels"
     fi
     run arch-chroot /mnt runuser -u "$user" -- env \
       "HOME=/home/$user" "USER=$user" "LOGNAME=$user" "UV_LINK_MODE=copy" bash -c \
-      "mkdir -p ~/.local/state/quickshell && uv venv --prompt .venv ~/.local/state/quickshell/.venv -p 3.12 && uv pip install --python ~/.local/state/quickshell/.venv/bin/python $uv_wheel_flags -r /usr/share/tsukuyomi/shell/requirements.txt" \
+      "mkdir -p ~/.local/state/quickshell && timeout 120 uv venv $uv_network_flags --prompt .venv ~/.local/state/quickshell/.venv --python $python && timeout 180 uv pip install $uv_network_flags --python ~/.local/state/quickshell/.venv/bin/python $uv_wheel_flags -r /usr/share/tsukuyomi/shell/requirements.txt" \
       || log "warning: uv Python venv setup skipped or offline; run 'uv pip install' on first boot if needed"
   fi
 
@@ -200,10 +207,10 @@ tsukuyomi_ensure_google_sans_flex() {
     log "(dry-run) ensuring Google Sans Flex font is installed in /usr/share/fonts/google-sans-flex"
     return 0
   fi
-  if chroot_has git; then
+  if [[ -z $TSUKUYOMI_OFFLINE_REPO ]] && chroot_has git; then
     log "fetching Google Sans Flex variable font (end-4/google-sans-flex)"
     run arch-chroot /mnt bash -c \
-      'rm -rf /usr/share/fonts/google-sans-flex && git clone --depth=1 https://github.com/end-4/google-sans-flex /usr/share/fonts/google-sans-flex && rm -rf /usr/share/fonts/google-sans-flex/.git' \
+      'rm -rf /usr/share/fonts/google-sans-flex && timeout 30 git clone --depth=1 https://github.com/end-4/google-sans-flex /usr/share/fonts/google-sans-flex && rm -rf /usr/share/fonts/google-sans-flex/.git' \
       || log "warning: could not fetch Google Sans Flex font offline; install ttf-google-sans-flex later"
   fi
 }
@@ -297,53 +304,8 @@ tsukuyomi_install_staged_pkgbuilds() {
 tsukuyomi_install_aur_layer() {
   local user=$1
   local aur_file="$TSUKUYOMI_SHARE/packages/end4-aur.packages"
-  local local_repo="$TSUKUYOMI_SHARE/repo/x86_64"
-
-  if [[ -f "$local_repo/tsukuyomi-local.db.tar.gz" ]]; then
-    log "installing end-4 custom packages from staged [tsukuyomi-local] repo"
-    local -a local_pkgs=()
-    shopt -s nullglob
-    local_pkgs=("$local_repo"/*.pkg.tar.zst)
-    shopt -u nullglob
-    if (( ${#local_pkgs[@]} > 0 )); then
-      # Copy into /mnt/usr/share/tsukuyomi/repo/x86_64 if not already there from cp -a $TSUKUYOMI_SHARE;
-      # never stage under /mnt/tmp because arch-chroot mounts a fresh tmpfs over /mnt/tmp.
-      local chroot_repo="/usr/share/tsukuyomi/repo/x86_64"
-      if [[ -z ${TSUKUYOMI_DRYRUN:-} ]] && ! compgen -G "/mnt${chroot_repo}/*.pkg.tar.zst" >/dev/null 2>&1; then
-        chroot_repo="/var/tmp/tsukuyomi-repo"
-        run rm -rf "/mnt${chroot_repo}"
-        run mkdir -p "/mnt${chroot_repo}"
-        run cp -a "${local_pkgs[@]}" "/mnt${chroot_repo}/"
-      fi
-      if tsukuyomi_offline_active; then
-        local off_conf="/etc/pacman.d/tsukuyomi-offline.conf"
-        local did_bind=0
-        run mkdir -p /mnt/usr/share/tsukuyomi/offline/repo
-        if [[ -z ${TSUKUYOMI_DRYRUN:-} ]] && ! mountpoint -q /mnt/usr/share/tsukuyomi/offline/repo 2>/dev/null; then
-          mount --bind "$TSUKUYOMI_OFFLINE_REPO" /mnt/usr/share/tsukuyomi/offline/repo && did_bind=1
-        fi
-        write_file "/mnt${off_conf}" <<EOF
-[options]
-Architecture = auto
-HoldPkg     = pacman glibc
-ParallelDownloads = 8
-SigLevel    = Never
-LocalFileSigLevel = Never
-
-[tsukuyomi-offline]
-SigLevel = Never
-Server = file:///usr/share/tsukuyomi/offline/repo
-EOF
-        run arch-chroot /mnt bash -c "pacman --config '$off_conf' -U --noconfirm --needed '$chroot_repo'/*.pkg.tar.zst"
-        (( did_bind == 1 )) && umount /mnt/usr/share/tsukuyomi/offline/repo 2>/dev/null || true
-        run rm -f "/mnt${off_conf}" /mnt/var/lib/pacman/sync/tsukuyomi-offline.db* /mnt/var/lib/pacman/sync/tsukuyomi-offline.files*
-      else
-        run arch-chroot /mnt bash -c "pacman -U --noconfirm --needed '$chroot_repo'/*.pkg.tar.zst || (pacman -Sy --noconfirm && pacman -U --noconfirm --needed '$chroot_repo'/*.pkg.tar.zst)"
-      fi
-      run rm -rf /mnt/usr/share/tsukuyomi/repo /mnt/usr/share/tsukuyomi/offline /mnt/var/tmp/tsukuyomi-repo
-      return 0
-    fi
-  fi
+  # A bundled repo's packages were installed in the same transaction as the base.
+  [[ -z $TSUKUYOMI_LOCAL_REPO && -z $TSUKUYOMI_OFFLINE_REPO ]] || return 0
 
   [[ ${TSUKUYOMI_INSTALL_AUR:-1} == 1 && -f $aur_file ]] || return 0
 
@@ -370,7 +332,7 @@ EOF
     for pkg in "${aur_pkgs[@]}"; do
       log "AUR: installing %s" "$pkg"
       run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
-        timeout 600 "$helper" -S --noconfirm --skipreview --needed "$pkg" \
+        timeout 300 "$helper" -S --noconfirm --needed "$pkg" \
         || log "warning: AUR package %s failed or timed out (installable later via %s -S %s)" "$pkg" "$helper" "$pkg"
     done
   fi

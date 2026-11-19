@@ -27,7 +27,6 @@ tsukuyomi_preflight() {
 
   [[ -d $TSUKUYOMI_SHARE ]] || die "Tsukuyomi data directory not found: %s" "$TSUKUYOMI_SHARE"
 
-  tsukuyomi_cleanup_mounts
   log "preflight passed (disk=%s, user=%s, host=%s, encrypt=%s)" \
     "$TSUKUYOMI_DISK" "$TSUKUYOMI_USERNAME" "$TSUKUYOMI_HOSTNAME" "$TSUKUYOMI_ENCRYPT"
 }

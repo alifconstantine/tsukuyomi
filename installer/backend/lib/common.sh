@@ -79,7 +79,7 @@ dev_uuid() {
 
 chroot_has() {
   [[ -n ${TSUKUYOMI_DRYRUN:-} ]] && return 0
-  arch-chroot /mnt command -v "$1" >/dev/null 2>&1
+  arch-chroot /mnt /usr/bin/bash -c 'command -v "$1"' _ "$1" >/dev/null 2>&1
 }
 
 tsukuyomi_cleanup_mounts() {
@@ -91,10 +91,4 @@ tsukuyomi_cleanup_mounts() {
   if [[ -e /dev/mapper/root ]]; then
     cryptsetup close root 2>/dev/null || true
   fi
-}
-
-tsukuyomi_cleanup_on_err() {
-  local rc=$1
-  tsukuyomi_cleanup_mounts || true
-  exit "$rc"
 }
