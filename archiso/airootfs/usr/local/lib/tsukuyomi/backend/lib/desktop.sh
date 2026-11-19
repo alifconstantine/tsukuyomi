@@ -175,15 +175,19 @@ EOF
   fi
 }
 
-tsukuyomi_set_default_browser() {
-  local user=$1 desktop=""
+tsukuyomi_browser_desktop_entry() {
   case "${TSUKUYOMI_BROWSER:-}" in
-    brave-bin) desktop="brave-browser.desktop" ;;
-    firefox) desktop="firefox.desktop" ;;
-    zen-browser-bin) desktop="zen.desktop" ;;
-    chromium) desktop="chromium.desktop" ;;
-    *) return 0 ;;
+    brave-bin) printf '%s\n' brave-browser.desktop ;;
+    firefox) printf '%s\n' firefox.desktop ;;
+    zen-browser-bin) printf '%s\n' zen.desktop ;;
+    chromium) printf '%s\n' chromium.desktop ;;
   esac
+}
+
+tsukuyomi_set_default_browser() {
+  local user=$1 desktop
+  desktop=$(tsukuyomi_browser_desktop_entry)
+  [[ -n $desktop ]] || return 0
   if [[ -n ${TSUKUYOMI_DRYRUN:-} || -f "/mnt/usr/share/applications/$desktop" ]]; then
     log "default browser: %s" "$desktop"
     run mkdir -p "/mnt/home/$user/.config"
@@ -216,7 +220,11 @@ tsukuyomi_ensure_google_sans_flex() {
 }
 
 tsukuyomi_seed_end4_defaults() {
-  local user=$1
+  local user=$1 browser_desktop
+  browser_desktop=$(tsukuyomi_browser_desktop_entry)
+  if [[ -n $browser_desktop && -z ${TSUKUYOMI_DRYRUN:-} && ! -f /mnt/usr/share/applications/$browser_desktop ]]; then
+    browser_desktop=""
+  fi
 
   if chroot_has xdg-user-dirs-update; then
     log "creating XDG user directories for %s" "$user"
@@ -249,12 +257,15 @@ tsukuyomi_seed_end4_defaults() {
       "ILLOGICAL_IMPULSE_VIRTUAL_ENV=/home/$user/.local/state/quickshell/.venv" \
       bash -c '
         wall="$1"
+        browser_id="$2"
         cfg_dir="$HOME/.config/illogical-impulse"
         state_gen="$HOME/.local/state/quickshell/user/generated"
         script_dir="$HOME/.config/quickshell/ii/scripts/colors"
         mkdir -p "$cfg_dir" "$state_gen/wallpaper"
         if [[ ! -s "$cfg_dir/config.json" ]] && command -v jq >/dev/null 2>&1; then
-          jq -n --arg p "$wall" "{background: {wallpaperPath: \$p}}" > "$cfg_dir/config.json"
+          jq -n --arg p "$wall" --arg browser "$browser_id" \
+            "{background: {wallpaperPath: \$p}, dock: {pinnedApps: ([\"org.kde.dolphin\"] + ([\$browser] | map(select(length > 0))) + [\"kitty\"])}}" \
+            > "$cfg_dir/config.json"
         fi
         if command -v matugen >/dev/null 2>&1; then
           matugen --source-color-index 0 image "$wall" --mode dark --type scheme-tonal-spot >/dev/null 2>&1 || true
@@ -270,7 +281,7 @@ tsukuyomi_seed_end4_defaults() {
           deactivate
           [[ -x "$script_dir/applycolor.sh" ]] && "$script_dir/applycolor.sh" >/dev/null 2>&1 || true
         fi
-      ' _ "$init_wall" || log "warning: initial Material You theme generation skipped"
+      ' _ "$init_wall" "${browser_desktop%.desktop}" || log "warning: initial Material You theme generation skipped"
   fi
 }
 
