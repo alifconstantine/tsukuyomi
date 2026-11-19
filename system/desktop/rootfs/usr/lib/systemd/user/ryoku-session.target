@@ -1,0 +1,5 @@
+[Unit]
+Description=Tsukuyomi desktop session
+Wants=graphical-session.target ryoku-shell.service ryogami.service hypridle.service
+Before=graphical-session.target
+PartOf=graphical-session.target

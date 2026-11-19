@@ -4,6 +4,7 @@ work/
 out/
 build/
 .vm-test/
+.vm-test.*/
 *.iso
 *.img
 *.cer
@@ -25,6 +26,7 @@ repo/x86_64/*.pkg.tar.zst*
 repo/x86_64/*.db*
 repo/x86_64/*.files*
 repo/offline/
+repo/ryoku/
 repo/offline-cache/
 repo/uv-wheels/
 repo/end4-python/

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Tsukuyomi
+Comment=Tsukuyomi desktop with Hyprland
+Exec=/usr/bin/tsukuyomi-session
+Type=Application
+DesktopNames=Hyprland

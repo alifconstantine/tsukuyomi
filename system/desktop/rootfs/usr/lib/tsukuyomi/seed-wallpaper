@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+state="${XDG_STATE_HOME:-$HOME/.local/state}/tsukuyomi"
+wallpaper="$HOME/Pictures/Wallpapers/Black Hole.webp"
+[[ -r $wallpaper && ! -e $state/wallpaper-initialized ]] || exit 0
+
+for attempt in {1..40}; do
+    if ryogami wallpaper set "$wallpaper" 2>/dev/null; then
+        mkdir -p "$state"
+        touch "$state/wallpaper-initialized"
+        exit 0
+    fi
+    sleep 0.25
+done
+echo 'Tsukuyomi: could not set the initial wallpaper' >&2
+exit 1

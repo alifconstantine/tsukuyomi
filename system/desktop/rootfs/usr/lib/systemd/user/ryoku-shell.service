@@ -1,0 +1,14 @@
+[Unit]
+Description=Ryoku desktop shell
+PartOf=ryoku-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+ExecStart=/usr/bin/ryoku-shell daemon
+Environment=RYOKU_POLKIT_AGENT=1
+Environment=QT_MEDIA_BACKEND=ffmpeg
+Environment=QT_FFMPEG_DECODING_HW_DEVICE_TYPES=
+Restart=on-failure
+RestartSec=2
+KillMode=process
+Slice=session.slice

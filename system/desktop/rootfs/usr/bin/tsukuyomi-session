@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -uo pipefail
+export RYOKU_WM=hyprland XDG_CURRENT_DESKTOP=Hyprland
+trap 'systemctl --user stop ryoku-session.target' EXIT
+start-hyprland "$@"
