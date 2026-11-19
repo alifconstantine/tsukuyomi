@@ -112,7 +112,7 @@ func probeSystem() sysSnapshot {
 	}
 	if out, err := exec.Command("nmcli", "-t", "-f", "STATE", "general").Output(); err == nil {
 		st := strings.TrimSpace(string(out))
-		if strings.Contains(st, "connected") {
+		if strings.HasPrefix(st, "connected") {
 			snap.Network = "Connected"
 		} else if st != "" {
 			snap.Network = st
