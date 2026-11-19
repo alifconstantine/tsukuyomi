@@ -80,6 +80,17 @@ Singleton {
 
             property string panelFamily: "ii" // "ii", "waffle"
 
+            property JsonObject tsukuyomi: JsonObject {
+                property bool islands: true
+                property string appearance: "system"
+                property bool glass: true
+                property string accentSource: "neutral"
+                property color accentPreset: "#6389bf"
+                property color customAccent: "#6389bf"
+                property string logo: "arch"
+                property list<string> indicators: ["network", "volume", "battery", "brightness"]
+            }
+
             property JsonObject policies: JsonObject {
                 property int ai: 1 // 0: No | 1: Yes | 2: Local
                 property int weeb: 1 // 0: No | 1: Open | 2: Closet
@@ -164,7 +175,7 @@ Singleton {
             property JsonObject background: JsonObject {
                 property JsonObject widgets: JsonObject {
                     property JsonObject clock: JsonObject {
-                        property bool enable: true
+                        property bool enable: false
                         property bool showOnlyWhenLocked: false
                         property string placementStrategy: "leastBusy" // "free", "leastBusy", "mostBusy"
                         property real x: 100
@@ -323,9 +334,9 @@ Singleton {
             }
 
             property JsonObject dock: JsonObject {
-                property bool enable: false
-                property bool monochromeIcons: true
-                property real height: 60
+                property bool enable: true
+                property bool monochromeIcons: false
+                property real height: 64
                 property real hoverRegionHeight: 2
                 property bool pinnedOnStartup: false
                 property bool hoverToReveal: true // When false, only reveals on empty workspace
