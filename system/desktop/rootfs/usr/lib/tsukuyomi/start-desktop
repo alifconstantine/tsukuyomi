@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
+qt_config="$config_home/qt6ct/qt6ct.conf"
+qt_palette="$HOME/.config/qt6ct/colors/ryoku.conf"
+# The shell writes this palette when a theme is applied. Seed only the
+# shipped setting on first login so Qt apps already have a dark palette.
+if [[ ! -e $qt_palette && -r $qt_config ]] &&
+    grep -Fxq 'color_scheme_path=~/.config/qt6ct/colors/ryoku.conf' "$qt_config"; then
+    if mkdir -p -- "${qt_palette%/*}"; then
+        cp --update=none -- /usr/share/qt6ct/colors/darker.conf "$qt_palette" ||
+            echo 'Could not seed the default Qt palette.' >&2
+    fi
+fi
+
 dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY \
-    HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_ID RYOKU_WM
+    HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_ID \
+    QT_QPA_PLATFORMTHEME RYOKU_WM
 systemctl --user start ryoku-session.target
 systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal-gtk.service

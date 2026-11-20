@@ -1,6 +1,6 @@
 pkgname=tsukuyomi-ryoku-desktop
 pkgver=1.0.9.r6109.g08ff328
-pkgrel=4
+pkgrel=5
 pkgdesc='Tsukuyomi desktop with the Ryoku shell and Hyprland provider'
 arch=('x86_64')
 url='https://github.com/alifconstantine/tsukuyomi-shell'
@@ -10,8 +10,8 @@ depends=("ryoku-shell=$_ryoku" "ryoku-hub=$_ryoku" "ryoku-blobs=$_ryoku"
          "ryoku=$_ryoku" "ryoku-palette-bridge=$_ryoku" "ryogami=$_ryoku"
          'hyprland' 'hypridle' 'hyprsunset' 'xorg-xwayland' 'gnome-keyring'
          'xdg-desktop-portal-gtk' 'xdg-desktop-portal-hyprland'
-         'dolphin' 'kitty' 'papirus-icon-theme' 'inter-font' 'gnome-themes-extra'
-         'qt6-wayland' 'qt6-5compat' 'syntax-highlighting' 'playerctl' 'grim' 'slurp'
+         'dolphin' 'konsole' 'kitty' 'fish' 'papirus-icon-theme' 'inter-font' 'gnome-themes-extra'
+         'qt6ct' 'qt6-wayland' 'qt6-5compat' 'syntax-highlighting' 'playerctl' 'grim' 'slurp'
          'cava' 'hyprpicker' 'gpu-screen-recorder' 'libqalculate' 'matugen')
 options=('!strip' '!debug')
 
