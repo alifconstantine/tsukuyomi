@@ -50,19 +50,22 @@ supports_kitty_graphics() {
 }
 
 run_preset() {
-  local cfg=$1 mode=${2:-tsukuyomi}
-  shift 2
-  local emblem="" has_custom_cfg=0 arg
+  local cfg=$1
+  shift
+  local emblem="" has_custom_cfg=0 has_custom_logo=0 arg
   for arg in "$@"; do
     case "$arg" in
-      -c|--config|--config=*) has_custom_cfg=1; break ;;
+      -c|--config|--config=*) has_custom_cfg=1 ;;
+      -l|--logo|--logo=*|--logo-type|--logo-type=*) has_custom_logo=1 ;;
     esac
   done
   local -a cfg_args=()
   if (( ! has_custom_cfg )); then
     cfg_args=(--config "$cfg")
   fi
-  if [[ "$mode" == "tsukuyomi" ]] && (( ! has_custom_cfg )) && supports_kitty_graphics; then
+  if (( ! has_custom_cfg && ! has_custom_logo )) &&
+      grep -Eq '^[[:space:]]*"source"[[:space:]]*:[[:space:]]*"~/.config/fastfetch/tsukuyomi-logo\.txt"' "$cfg" &&
+      supports_kitty_graphics; then
     emblem=$(resolve_emblem || true)
   fi
   if [[ -n "$emblem" ]]; then
@@ -138,17 +141,13 @@ if [[ -n $logo_mode ]]; then
     *) echo "tsukuyomi-fetch: unsupported logo '$logo_mode' (want tsukuyomi|arch)" >&2; exit 2 ;;
   esac
   preset=$(resolve_preset "$logo_mode")
-  run_preset "$preset" "$logo_mode" "${extra_args[@]}"
+  run_preset "$preset" "${extra_args[@]}"
 fi
 
 if [[ -f "$CONFIG_DIR/config.jsonc" ]]; then
-  active_mode="tsukuyomi"
-  if grep -q '"source"[[:space:]]*:[[:space:]]*"arch"' "$CONFIG_DIR/config.jsonc" 2>/dev/null; then
-    active_mode="arch"
-  fi
-  run_preset "$CONFIG_DIR/config.jsonc" "$active_mode" "${extra_args[@]}"
+  run_preset "$CONFIG_DIR/config.jsonc" "${extra_args[@]}"
 elif [[ -f "$SYSTEM_DIR/config-tsukuyomi.jsonc" ]]; then
-  run_preset "$SYSTEM_DIR/config-tsukuyomi.jsonc" "tsukuyomi" "${extra_args[@]}"
+  run_preset "$SYSTEM_DIR/config-tsukuyomi.jsonc" "${extra_args[@]}"
 else
   exec fastfetch "${extra_args[@]}"
 fi
