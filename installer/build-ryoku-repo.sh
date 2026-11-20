@@ -50,7 +50,7 @@ cp -a "$work/upstream/usr/lib/qt6/qml/Ryoku" "$payload/usr/lib/qt6/qml/"
 mv "$work/profile/.config/"{hypr,quickshell} "$data/config/"
 cp -a "$work/profile/." "$skel/"
 cp -a "$data/config/"{hypr,matugen,qt6ct} "$skel/.config/"
-for module in binds window_rules; do
+for module in binds decoration window_rules; do
     ln -sfn "/usr/share/ryoku/config/hypr/modules/$module.lua" "$skel/.config/hypr/modules/$module.lua"
 done
 ln -s /usr/share/ryoku/config/quickshell "$skel/.config/quickshell"
