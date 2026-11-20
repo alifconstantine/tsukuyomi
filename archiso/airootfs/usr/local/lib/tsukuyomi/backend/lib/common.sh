@@ -86,6 +86,14 @@ tsukuyomi_cleanup_mounts() {
   [[ -n ${TSUKUYOMI_DRYRUN:-} ]] && return 0
   swapoff -a 2>/dev/null || true
   if mountpoint -q /mnt; then
+    local keyring=/mnt/etc/pacman.d/gnupg
+    # pacstrap -K can leave its agent listening on the target filesystem.
+    if [[ -S $keyring/S.gpg-agent ]]; then
+      timeout 5 gpg-connect-agent --raw-socket "$keyring/S.gpg-agent" KILLAGENT /bye >/dev/null 2>&1 || true
+    elif [[ -d $keyring ]]; then
+      # pacstrap joins /mnt and /etc/pacman.d/gnupg with a slash.
+      timeout 5 gpgconf --homedir /mnt//etc/pacman.d/gnupg --kill gpg-agent >/dev/null 2>&1 || true
+    fi
     umount -R /mnt || return
   fi
   if [[ -e /dev/mapper/root ]]; then
