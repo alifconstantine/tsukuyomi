@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tsukuyomi Fastfetch wrapper with kitty-direct PNG emblem and Tsukuyomi <-> Arch switching.
+# Tsukuyomi Fastfetch wrapper with a PNG emblem and Tsukuyomi <-> Arch switching.
 set -euo pipefail
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/fastfetch"
@@ -38,7 +38,15 @@ resolve_emblem() {
 }
 
 supports_kitty_graphics() {
-  [[ -n "${KITTY_WINDOW_ID:-}" || "${TERM:-}" == "xterm-kitty" || "${TERM:-}" == "xterm-ghostty" || "${TERM_PROGRAM:-}" == "ghostty" ]]
+  local rows columns
+  [[ -t 1 ]] || return 1
+  case ${TERM:-} in
+    screen*|tmux*) return 1 ;;
+  esac
+  [[ -n "${KITTY_WINDOW_ID:-}" || "${TERM:-}" == "xterm-kitty" || "${TERM:-}" == "xterm-ghostty" || "${TERM_PROGRAM:-}" == "ghostty" ]] || return 1
+  read -r rows columns < <(stty size </dev/tty 2>/dev/null) || return 1
+  # Reserve room for the report and the prompt before displaying an inline image.
+  (( rows >= 24 && columns >= 80 ))
 }
 
 run_preset() {
@@ -54,16 +62,15 @@ run_preset() {
   if (( ! has_custom_cfg )); then
     cfg_args=(--config "$cfg")
   fi
-  if [[ "$mode" == "tsukuyomi" ]] && supports_kitty_graphics; then
+  if [[ "$mode" == "tsukuyomi" ]] && (( ! has_custom_cfg )) && supports_kitty_graphics; then
     emblem=$(resolve_emblem || true)
   fi
   if [[ -n "$emblem" ]]; then
     exec fastfetch "${cfg_args[@]}" \
-      --logo-type kitty-direct \
+      --logo-type kitty \
       --logo "$emblem" \
       --logo-width 28 \
       --logo-height 14 \
-      --logo-preserve-aspect-ratio true \
       --logo-padding-top 2 \
       --logo-padding-left 2 \
       --logo-padding-right 4 \
