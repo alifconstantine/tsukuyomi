@@ -239,6 +239,8 @@ ShellRoot {
         Loader {
             anchors.fill: parent
             focus: true
+            // Let the lock surface cover the output while an add-on theme loads.
+            asynchronous: shellRoot.themePath !== shellRoot.stockThemePath
             source: "file://" + shellRoot.themePath + "/Main.qml"
             onLoaded: {
                 if (item.clock24h !== undefined)
