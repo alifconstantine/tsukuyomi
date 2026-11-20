@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Deploy end-4 (tsukuyomi-shell), fastfetch, SDDM theme, Plymouth theme, and AUR/venv deps.
+# Deploy the Ryoku desktop profile and Tsukuyomi system themes.
 
 tsukuyomi_deploy_desktop() {
   local user=$TSUKUYOMI_USERNAME
 
-  log "deploying /etc/skel (tsukuyomi-shell + fastfetch) to target user %s" "$user"
+  log "deploying Tsukuyomi desktop defaults for %s" "$user"
+  local desktop_skel=/mnt/usr/share/tsukuyomi/ryoku/skel
+  local user_home="/mnt/home/$user"
+  if [[ -z ${TSUKUYOMI_DRYRUN:-} && ! -r "$desktop_skel/.config/ryoku/shell.json" ]]; then
+    die "missing packaged Ryoku desktop defaults"
+  fi
   run mkdir -p /mnt/etc/skel /mnt/usr/local/bin /mnt/usr/share/tsukuyomi
   run cp -a /etc/skel/. /mnt/etc/skel/
-  run cp -a /etc/skel/. "/mnt/home/$user/"
-  run find /mnt/etc/skel/.config "/mnt/home/$user/.config" \
-    -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod 0755 {} +
+  run cp -a "$desktop_skel/." /mnt/etc/skel/
+  run cp -a /mnt/etc/skel/. "$user_home/"
+  tsukuyomi_seed_ryoku_dock "$user"
   run arch-chroot /mnt chown -R "$user:$user" "/home/$user"
   run arch-chroot /mnt chmod 0700 "/home/$user"
 
@@ -60,7 +65,7 @@ EOF
 
   # SDDM Wayland kiosk greeter + dark Tsukuyomi theme (Ryoku clockwork/orbital)
   if [[ -d "$TSUKUYOMI_SHARE/sddm/themes/tsukuyomi" ]]; then
-    log "configuring Tsukuyomi SDDM Wayland greeter (default session: Hyprland)"
+    log "configuring Tsukuyomi SDDM Wayland greeter (default session: Tsukuyomi)"
     run mkdir -p /mnt/etc/sddm.conf.d /mnt/usr/share/sddm/themes/tsukuyomi /mnt/etc/systemd/system
     run install -m 0644 "$TSUKUYOMI_SHARE/sddm/10-tsukuyomi.conf" /mnt/etc/sddm.conf.d/10-tsukuyomi.conf
     run cp -a "$TSUKUYOMI_SHARE/sddm/themes/tsukuyomi/." /mnt/usr/share/sddm/themes/tsukuyomi/
@@ -104,54 +109,6 @@ EOF
     run chmod 0600 /mnt/etc/NetworkManager/system-connections/*.nmconnection
   fi
 
-  # Temporary DNS inside chroot so uv, font fallback, and AUR helpers can resolve hosts
-  local made_resolv=0
-  local saved_resolv_link=""
-  if [[ -z ${TSUKUYOMI_DRYRUN:-} && ! -e /mnt/etc/resolv.conf && -e /etc/resolv.conf ]]; then
-    if [[ -L /mnt/etc/resolv.conf ]]; then
-      saved_resolv_link=$(readlink /mnt/etc/resolv.conf 2>/dev/null || true)
-    fi
-    cp -L --remove-destination /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null && made_resolv=1 || true
-  fi
-
-  # Install local [tsukuyomi-local] AUR repo packages if staged, else staged PKGBUILDs + paru/yay
-  tsukuyomi_install_aur_layer "$user"
-
-  # Guarantee Google Sans Flex is installed even if AUR/local repo skipped it
-  tsukuyomi_ensure_google_sans_flex
-
-  # Prepare end-4 Python venv if online or wheels staged (non-fatal if offline)
-  if [[ -f "$TSUKUYOMI_SHARE/shell/requirements.txt" ]] && chroot_has uv; then
-    log "setting up end-4 Quickshell Python environment (.venv)"
-    local uv_wheel_flags=""
-    local uv_network_flags=""
-    local python="3.12"
-    if [[ -x /mnt/usr/share/tsukuyomi/shell/python/bin/python3.12 ]]; then
-      python="/usr/share/tsukuyomi/shell/python/bin/python3.12"
-    fi
-    [[ -z $TSUKUYOMI_OFFLINE_REPO ]] || uv_network_flags="--offline"
-    if [[ -d /mnt/usr/share/tsukuyomi/shell/wheels ]] && compgen -G "/mnt/usr/share/tsukuyomi/shell/wheels/*.whl" >/dev/null; then
-      uv_wheel_flags="--no-index --find-links /usr/share/tsukuyomi/shell/wheels"
-    fi
-    run arch-chroot /mnt runuser -u "$user" -- env \
-      "HOME=/home/$user" "USER=$user" "LOGNAME=$user" "UV_LINK_MODE=copy" bash -c \
-      "mkdir -p ~/.local/state/quickshell && timeout 120 uv venv $uv_network_flags --prompt .venv ~/.local/state/quickshell/.venv --python $python && timeout 180 uv pip install $uv_network_flags --python ~/.local/state/quickshell/.venv/bin/python $uv_wheel_flags -r /usr/share/tsukuyomi/shell/requirements.txt" \
-      || log "warning: uv Python venv setup skipped or offline; run 'uv pip install' on first boot if needed"
-  fi
-
-  if (( made_resolv == 1 )); then
-    rm -f /mnt/etc/resolv.conf 2>/dev/null || true
-    if [[ -n $saved_resolv_link ]]; then
-      ln -s "$saved_resolv_link" /mnt/etc/resolv.conf 2>/dev/null || true
-    fi
-  fi
-
-  # Refresh font cache so newly installed icon/UI fonts are immediately discovered
-  run arch-chroot /mnt fc-cache -f || true
-
-  # Seed end-4 user directories, dark-mode gsettings, and initial wallpaper/Material You palette
-  tsukuyomi_seed_end4_defaults "$user"
-
   # Point default web browser if one was selected
   tsukuyomi_set_default_browser "$user"
 
@@ -169,10 +126,7 @@ EOF
   run arch-chroot /mnt systemctl enable "${enable_services[@]}"
   run arch-chroot /mnt systemctl set-default graphical.target
 
-  run mkdir -p /mnt/etc/systemd/user/default.target.wants
-  if [[ -n ${TSUKUYOMI_DRYRUN:-} || -f /mnt/usr/lib/systemd/user/ydotool.service ]]; then
-    run ln -sf /usr/lib/systemd/user/ydotool.service /mnt/etc/systemd/user/default.target.wants/ydotool.service
-  fi
+
 }
 
 tsukuyomi_browser_desktop_entry() {
@@ -203,150 +157,17 @@ EOF
   fi
 }
 
-tsukuyomi_ensure_google_sans_flex() {
-  if [[ -z ${TSUKUYOMI_DRYRUN:-} ]] && [[ -d /mnt/usr/share/fonts ]] && find /mnt/usr/share/fonts -iname '*GoogleSansFlex*' 2>/dev/null | grep -q .; then
+# Bind the initial dock to the same desktop ID used by the browser association.
+tsukuyomi_seed_ryoku_dock() {
+  local user=$1 browser updated
+  local config="/mnt/home/$user/.config/ryoku/shell.json"
+  browser=$(tsukuyomi_browser_desktop_entry)
+  [[ -n $browser ]] || return 0
+  if [[ -z ${TSUKUYOMI_DRYRUN:-} && ! -f "/mnt/usr/share/applications/$browser" ]]; then
     return 0
   fi
-  if [[ -n ${TSUKUYOMI_DRYRUN:-} ]]; then
-    log "(dry-run) ensuring Google Sans Flex font is installed in /usr/share/fonts/google-sans-flex"
-    return 0
-  fi
-  if [[ -z $TSUKUYOMI_OFFLINE_REPO ]] && chroot_has git; then
-    log "fetching Google Sans Flex variable font (end-4/google-sans-flex)"
-    run arch-chroot /mnt bash -c \
-      'rm -rf /usr/share/fonts/google-sans-flex && timeout 30 git clone --depth=1 https://github.com/end-4/google-sans-flex /usr/share/fonts/google-sans-flex && rm -rf /usr/share/fonts/google-sans-flex/.git' \
-      || log "warning: could not fetch Google Sans Flex font offline; install ttf-google-sans-flex later"
-  fi
-}
-
-tsukuyomi_seed_end4_defaults() {
-  local user=$1 browser_desktop
-  browser_desktop=$(tsukuyomi_browser_desktop_entry)
-  if [[ -n $browser_desktop && -z ${TSUKUYOMI_DRYRUN:-} && ! -f /mnt/usr/share/applications/$browser_desktop ]]; then
-    browser_desktop=""
-  fi
-
-  if chroot_has xdg-user-dirs-update; then
-    log "creating XDG user directories for %s" "$user"
-    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
-      xdg-user-dirs-update || true
-  fi
-
-  if chroot_has gsettings && chroot_has dbus-run-session; then
-    log "applying end-4 GTK/GNOME dark theme and font defaults"
-    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
-      dbus-run-session -- bash -c "
-        gsettings set org.gnome.desktop.interface font-name 'Google Sans Flex Medium 11 @opsz=11,wght=500'
-        gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
-        gsettings set org.gnome.desktop.interface gtk-theme 'adw-gtk3-dark'
-      " || log "warning: gsettings default setup skipped"
-  fi
-
-  local init_wall="/home/$user/Pictures/Wallpapers/default_wallpaper.webp"
-  if [[ -z ${TSUKUYOMI_DRYRUN:-} && ! -f "/mnt$init_wall" ]]; then
-    init_wall="/home/$user/.config/quickshell/ii/assets/images/default_wallpaper.webp"
-  fi
-
-  if [[ -n ${TSUKUYOMI_DRYRUN:-} || -f "/mnt$init_wall" ]]; then
-    log "seeding initial end-4 wallpaper config and Material You palette"
-    run arch-chroot /mnt runuser -u "$user" -- env \
-      "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
-      "XDG_CONFIG_HOME=/home/$user/.config" \
-      "XDG_CACHE_HOME=/home/$user/.cache" \
-      "XDG_STATE_HOME=/home/$user/.local/state" \
-      "ILLOGICAL_IMPULSE_VIRTUAL_ENV=/home/$user/.local/state/quickshell/.venv" \
-      bash -c '
-        wall="$1"
-        browser_id="$2"
-        cfg_dir="$HOME/.config/illogical-impulse"
-        state_gen="$HOME/.local/state/quickshell/user/generated"
-        script_dir="$HOME/.config/quickshell/ii/scripts/colors"
-        mkdir -p "$cfg_dir" "$state_gen/wallpaper"
-        if [[ ! -s "$cfg_dir/config.json" ]] && command -v jq >/dev/null 2>&1; then
-          jq -n --arg p "$wall" --arg browser "$browser_id" \
-            "{background: {wallpaperPath: \$p}, dock: {pinnedApps: ([\"org.kde.dolphin\"] + ([\$browser] | map(select(length > 0))) + [\"kitty\"])}}" \
-            > "$cfg_dir/config.json"
-        fi
-        if command -v matugen >/dev/null 2>&1; then
-          matugen --source-color-index 0 image "$wall" --mode dark --type scheme-tonal-spot >/dev/null 2>&1 || true
-        fi
-        if [[ -f "$HOME/.local/state/quickshell/.venv/bin/activate" && -f "$script_dir/generate_colors_material.py" ]]; then
-          # shellcheck disable=SC1091
-          source "$HOME/.local/state/quickshell/.venv/bin/activate"
-          python3 "$script_dir/generate_colors_material.py" \
-            --path "$wall" --mode dark --scheme scheme-tonal-spot \
-            --termscheme "$script_dir/terminal/scheme-base.json" --blend_bg_fg \
-            --harmony 0.6 --harmonize_threshold 100 --term_fg_boost 0.35 \
-            --cache "$state_gen/color.txt" > "$state_gen/material_colors.scss" 2>/dev/null || true
-          deactivate
-          [[ -x "$script_dir/applycolor.sh" ]] && "$script_dir/applycolor.sh" >/dev/null 2>&1 || true
-        fi
-      ' _ "$init_wall" "${browser_desktop%.desktop}" || log "warning: initial Material You theme generation skipped"
-  fi
-}
-
-tsukuyomi_install_staged_pkgbuilds() {
-  local user=$1
-  local pkgbuild_dir name work
-  local -a staged_dirs=(
-    "$TSUKUYOMI_SHARE/packages/pkgbuilds/ttf-google-sans-flex"
-    "$TSUKUYOMI_SHARE/packages/pkgbuilds/otf-space-grotesk"
-    "$TSUKUYOMI_SHARE/shell/dist-arch/illogical-impulse-bibata-modern-classic-bin"
-    "$TSUKUYOMI_SHARE/shell/dist-arch/illogical-impulse-microtex-git"
-  )
-
-  for pkgbuild_dir in "${staged_dirs[@]}"; do
-    [[ -f "$pkgbuild_dir/PKGBUILD" ]] || continue
-    name=$(basename "$pkgbuild_dir")
-    log "PKGBUILD: building & installing %s" "$name"
-    # Note: use /var/tmp instead of /tmp because arch-chroot mounts a blank tmpfs over /mnt/tmp.
-    work="/var/tmp/tsukuyomi-pkg-$name"
-    run rm -rf "/mnt$work"
-    run mkdir -p "/mnt$work"
-    run cp -a "$pkgbuild_dir/." "/mnt$work/"
-    run arch-chroot /mnt chown -R "$user:$user" "$work"
-    run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
-      bash -c "cd '$work' && timeout 600 makepkg -Afsi --noconfirm --needed" \
-      || log "warning: local PKGBUILD %s failed or timed out" "$name"
-    run rm -rf "/mnt$work"
-  done
-}
-
-tsukuyomi_install_aur_layer() {
-  local user=$1
-  local aur_file="$TSUKUYOMI_SHARE/packages/end4-aur.packages"
-  # A bundled repo's packages were installed in the same transaction as the base.
-  [[ -z $TSUKUYOMI_LOCAL_REPO && -z $TSUKUYOMI_OFFLINE_REPO ]] || return 0
-
-  [[ ${TSUKUYOMI_INSTALL_AUR:-1} == 1 && -f $aur_file ]] || return 0
-
-  write_file /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp <<EOF
-$user ALL=(ALL:ALL) NOPASSWD: ALL
-EOF
-  run chmod 0440 /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
-
-  tsukuyomi_install_staged_pkgbuilds "$user"
-
-  local -a aur_pkgs=()
-  mapfile -t aur_pkgs < <(grep -vE '^[[:space:]]*(#|$|illogical-impulse-|ttf-google-sans-flex$|otf-space-grotesk$)' "$aur_file" || true)
-
-  local helper=""
-  if chroot_has paru; then
-    helper="paru"
-  elif chroot_has yay; then
-    helper="yay"
-  fi
-
-  if (( ${#aur_pkgs[@]} > 0 )) && [[ -n $helper ]]; then
-    log "installing %d end-4 AUR package(s) via %s (one-by-one)" "${#aur_pkgs[@]}" "$helper"
-    local pkg
-    for pkg in "${aur_pkgs[@]}"; do
-      log "AUR: installing %s" "$pkg"
-      run arch-chroot /mnt runuser -u "$user" -- env "HOME=/home/$user" "USER=$user" "LOGNAME=$user" \
-        timeout 300 "$helper" -S --noconfirm --needed "$pkg" \
-        || log "warning: AUR package %s failed or timed out (installable later via %s -S %s)" "$pkg" "$helper" "$pkg"
-    done
-  fi
-
-  run rm -f /mnt/etc/sudoers.d/99-tsukuyomi-aur-tmp
+  log "pinning %s to the initial dock" "$browser"
+  if [[ -n ${TSUKUYOMI_DRYRUN:-} ]]; then return 0; fi
+  updated=$(jq --arg browser "${browser%.desktop}"     '.dock.pinned |= (.[0:2] + [$browser] + .[2:])' "$config")
+  printf '%s\n' "$updated" >"$config"
 }

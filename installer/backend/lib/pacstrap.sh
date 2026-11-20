@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pacstrap CachyOS base + hardware drivers + end-4 repository dependencies.
+# Pacstrap CachyOS base + hardware drivers + the Ryoku desktop package.
 
 read_pkg_section() {
   local file=$1 sec=$2
@@ -64,7 +64,8 @@ tsukuyomi_collect_packages() {
   local pkg_dir=$1 browser=$2 sec
   shift 2
   {
-    cat "$pkg_dir/base.packages" "$pkg_dir/end4-repo.packages"
+    cat "$pkg_dir/base.packages"
+    printf '%s\n' tsukuyomi-local/tsukuyomi-ryoku-desktop
     for sec in "$@"; do
       read_pkg_section "$pkg_dir/hardware.packages" "$sec"
     done
@@ -110,7 +111,7 @@ tsukuyomi_packages_prepare() {
   sections=$(tsukuyomi_detect_hw_sections) || return 1
   mapfile -t hw_sections <<<"$sections"
   local manifest
-  for manifest in base.packages end4-repo.packages hardware.packages; do
+  for manifest in base.packages hardware.packages; do
     [[ -r "$pkg_dir/$manifest" ]] || die "missing package list: %s" "$pkg_dir/$manifest"
   done
   packages=$(tsukuyomi_collect_packages "$pkg_dir" "${TSUKUYOMI_BROWSER:-none}" "${hw_sections[@]}")
@@ -123,16 +124,11 @@ tsukuyomi_packages_prepare() {
   TSUKUYOMI_PKG_WORK=$(mktemp -d)
   local offline="$TSUKUYOMI_SHARE/offline/repo"
   local custom="$TSUKUYOMI_SHARE/repo/x86_64"
-  if [[ -d $custom ]]; then
-    [[ -f "$custom/tsukuyomi-local.db" && -r "$pkg_dir/end4-aur.packages" ]] ||
-      die "bundled custom package repository is incomplete; rebuild the ISO"
-    TSUKUYOMI_LOCAL_REPO=$custom
-    mapfile -t -O "${#TSUKUYOMI_TARGET_PACKAGES[@]}" TSUKUYOMI_TARGET_PACKAGES < <(
-      awk 'NF && !/^#/ { print "tsukuyomi-local/" $1 }' "$pkg_dir/end4-aur.packages"
-    )
-  fi
+  [[ -f "$custom/tsukuyomi-local.db" ]] ||
+    die "bundled Ryoku desktop repository is missing; rebuild the ISO"
+  TSUKUYOMI_LOCAL_REPO=$custom
   if [[ -d $offline ]]; then
-    [[ -f "$offline/tsukuyomi-offline.db" && -n $TSUKUYOMI_LOCAL_REPO ]] ||
+    [[ -f "$offline/tsukuyomi-offline.db" ]] ||
       die "bundled offline repository is incomplete; rebuild the ISO"
     TSUKUYOMI_OFFLINE_REPO=$offline
     log "checking bundled packages for this hardware and browser"

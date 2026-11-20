@@ -44,7 +44,6 @@ source "$LIB_DIR/bootloader.sh"
 : "${TSUKUYOMI_ENCRYPT:=0}"
 : "${TSUKUYOMI_LUKS_PASSPHRASE:=}"
 : "${TSUKUYOMI_SUBVOL_SNAPSHOTS:=1}"
-: "${TSUKUYOMI_INSTALL_AUR:=1}"
 : "${TSUKUYOMI_SHARE:=/usr/share/tsukuyomi}"
 : "${TSUKUYOMI_DRYRUN:=}"
 

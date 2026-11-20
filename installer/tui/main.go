@@ -53,9 +53,9 @@ var (
 		{"disk", "Partitioning GPT target disk"},
 		{"luks", "Encryption volume setup"},
 		{"filesystems", "Creating Btrfs subvolumes & mounts"},
-		{"pacstrap", "Installing CachyOS, end-4 & CLI tools"},
+		{"pacstrap", "Installing CachyOS, Ryoku & CLI tools"},
 		{"configure", "Configuring locale, user & mkinitcpio"},
-		{"desktop", "Deploying end-4 shell, fastfetch & SDDM"},
+		{"desktop", "Deploying Tsukuyomi desktop, fastfetch & SDDM"},
 		{"bootloader", "Installing Limine UKI & Plymouth splash"},
 		{"finalize", "Finalizing & unmounting"},
 	}
@@ -1030,7 +1030,7 @@ func (m model) viewIntro() string {
 func (m model) viewWelcome() string {
 	lines := []string{
 		boldFg(cCrimson, "Tsukuyomi OS Guided Installer"),
-		fg(cMuted, "CachyOS base · Limine UKI · Plymouth · SDDM · Hyprland (end-4)"),
+		fg(cMuted, "CachyOS base · Limine UKI · Plymouth · SDDM · Hyprland (Ryoku)"),
 		"",
 		kv("Firmware", m.sys.Firmware),
 		kv("Processor", m.sys.CPU),
@@ -1039,7 +1039,7 @@ func (m model) viewWelcome() string {
 		"",
 		fg(cText, "Included stack:"),
 		fg(cMuted, "  • Kernel & Repos : CachyOS (linux-cachyos) + yay + paru"),
-		fg(cMuted, "  • Desktop Shell  : Hyprland + end-4 Quickshell + lockscreen"),
+		fg(cMuted, "  • Desktop Shell  : Hyprland + Ryoku + Tsukuyomi lockscreen"),
 		fg(cMuted, "  • CLI Toolkit    : htop, btop, neovim, ripgrep, fd, bat, eza, fzf, zoxide"),
 		"",
 		boldFg(cText, "Press Enter to begin installation."),
@@ -1209,7 +1209,7 @@ func (m model) viewReview() string {
 		kv("Encryption", encStr),
 		kv("Snapshots / Swap", fmt.Sprintf("%s · %d GiB swapfile", snapStr, swapChoices[m.swapIdx])),
 		kv("Host / User", fmt.Sprintf("%s · %s", m.hostname, m.username)),
-		kv("Desktop Stack", "CachyOS + Limine + Plymouth + SDDM + Hyprland (end-4)"),
+		kv("Desktop Stack", "CachyOS + Limine + Plymouth + SDDM + Hyprland (Ryoku)"),
 		"",
 		boldFg(cCrimson, "WARNING: All existing data on "+m.selectedDiskPath()+" will be erased."),
 		fmt.Sprintf("Type %s and press Enter to begin: %s", boldFg(cText, "INSTALL"), boldFg(cCrimson, m.confirmText+"_")),

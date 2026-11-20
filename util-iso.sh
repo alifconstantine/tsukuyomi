@@ -85,22 +85,19 @@ prepare_profile() {
     if (( EUID == 0 )) && [[ -n ${SUDO_USER:-} ]]; then
         as_builder=(runuser -u "$SUDO_USER" --)
     fi
-    if [[ -x "$workspace_scripts/sync-to-iso.sh" ]]; then
-        "${as_builder[@]}" "$workspace_scripts/sync-to-iso.sh" --manifests-only
-        if ! $online_only; then
-            "${as_builder[@]}" "$workspace_scripts/build-end4-repo.sh" --with-offline
-        fi
-        "${as_builder[@]}" env TSUKUYOMI_ONLINE_ONLY="$online_only" "$workspace_scripts/sync-to-iso.sh" --keep-manifests
-    elif ! $online_only; then
-        die "Offline ISO requires the tsukuyomi-os workspace with tsukuyomi-shell. Use -n to build an online ISO from this checkout."
-    fi
+    [[ -x "$workspace_scripts/sync-to-iso.sh" ]] ||
+        die "Building the ISO requires the Tsukuyomi OS workspace and shell checkout."
+    "${as_builder[@]}" "$src_dir/installer/build-ryoku-repo.sh"
     if ! $online_only; then
-        local payload="${src_dir}/archiso/airootfs/usr/share/tsukuyomi"
-        [[ -f "$payload/offline/repo/tsukuyomi-offline.db" \
-            && -f "$payload/repo/x86_64/tsukuyomi-local.db" \
-            && -x "$payload/shell/python/bin/python3.12" ]] \
-            && compgen -G "$payload/shell/wheels/*.whl" >/dev/null \
-            || die "The offline package repositories and end-4 Python runtime must be staged before building the ISO."
+        "${as_builder[@]}" "$src_dir/installer/build-offline-repo.sh"
+    fi
+    "${as_builder[@]}" env TSUKUYOMI_ONLINE_ONLY="$online_only" "$workspace_scripts/sync-to-iso.sh"
+    local payload="${src_dir}/archiso/airootfs/usr/share/tsukuyomi"
+    [[ -f "$payload/repo/x86_64/tsukuyomi-local.db" ]] ||
+        die "The Ryoku desktop repository must be staged before building the ISO."
+    if ! $online_only; then
+        [[ -f "$payload/offline/repo/tsukuyomi-offline.db" ]] ||
+            die "The offline package repository must be staged before building the ISO."
     fi
 
     fetch_cachyos_mirrorlist

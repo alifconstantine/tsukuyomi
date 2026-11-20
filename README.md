@@ -1,16 +1,16 @@
 # Tsukuyomi OS ISO
 
-Use the full `tsukuyomi-os` workspace with the sibling `tsukuyomi-shell` and `scripts` directories to build the offline installer. The build host needs Arch/CachyOS, archiso, Go, fakeroot, uv, the Arch and CachyOS keyrings, and the D-Bus, Cairo, and GObject Introspection development libraries for the Python wheels.
+Build from the full `tsukuyomi-os` workspace with the sibling `tsukuyomi-shell` and `scripts` directories. The build host needs Arch/CachyOS, `archiso`, Go, `base-devel`, `jq`, and the Arch and CachyOS keyrings.
 
-Run from this repository:
+Put the exact upstream Ryoku packages listed in [the input manifest](packages/ryoku-input.sha256) in `/var/cache/pacman/pkg` or set `TSUKUYOMI_RYOKU_CACHE` to an archive directory. Run the build from this repository.
 
 ```bash
 ./buildiso.sh
 ```
 
-The build downloads and verifies the target packages, then embeds them with the custom end-4 packages and Python 3.12 runtime. During installation, pacstrap reads the packages directly from the ISO.
+The build verifies the pinned Ryoku archives, builds `tsukuyomi-ryoku-desktop`, and embeds the desktop and CachyOS package repositories. Pacstrap reads the packages directly from the ISO. The desktop package owns QS Bar, Tsukuyomi Hub, and the Hyprland session. The installer sets the selected browser in the dock and keeps the Tsukuyomi boot, SDDM, and lockscreen stack.
 
-For a smaller installer that fetches system packages from mirrors, or a build from this repository alone:
+The smaller ISO bundles the same desktop package and fetches the other system packages from mirrors.
 
 ```bash
 ./buildiso.sh -n

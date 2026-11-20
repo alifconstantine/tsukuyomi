@@ -6,7 +6,7 @@ root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 pkg_dir="$root_dir/packages"
 cache="$root_dir/repo/offline-cache"
 out="$root_dir/repo/offline/x86_64"
-custom="$root_dir/repo/x86_64"
+custom="$root_dir/repo/ryoku/x86_64"
 
 source "$root_dir/installer/backend/lib/common.sh"
 source "$root_dir/installer/backend/lib/pacstrap.sh"
@@ -15,7 +15,7 @@ source "$root_dir/installer/backend/lib/pacstrap.sh"
 for tool in fakeroot pacman pacman-key repo-add flock; do
   command -v "$tool" >/dev/null || die "%s is required to build the offline repository" "$tool"
 done
-[[ -f "$custom/tsukuyomi-local.db" ]] || die "build the custom end-4 packages first with scripts/build-end4-repo.sh"
+[[ -f "$custom/tsukuyomi-local.db" ]] || die "build the desktop repository first with installer/build-ryoku-repo.sh"
 
 mkdir -p "$cache" "$(dirname "$out")"
 exec 9>"$cache/build.lock"
@@ -38,7 +38,6 @@ tsukuyomi_add_file_repo tsukuyomi-local "$custom" >>"$online"
 pac=(fakeroot pacman --noconfirm --disable-sandbox --config "$online" --dbpath "$work/db" --gpgdir "$keyring")
 "${pac[@]}" -Sy
 
-mapfile -t aur_targets < <(awk 'NF && !/^#/ { print "tsukuyomi-local/" $1 }' "$pkg_dir/end4-aur.packages")
 browsers=(none brave-bin firefox zen-browser-bin chromium)
 plans=()
 # Auto detection can select multiple GPU sections, with or without the VM section.
@@ -51,7 +50,7 @@ for ((mask=1; mask < 1 << ${#hardware[@]}; mask++)); do
   for browser in "${browsers[@]}"; do
     targets=$(tsukuyomi_collect_packages "$pkg_dir" "$browser" "${sections[@]}")
     plan="$work/plan-$mask-$browser"
-    printf '%s\n' "$targets" "${aur_targets[@]}" >"$plan"
+    printf '%s\n' "$targets" >"$plan"
     mapfile -t selection <"$plan"
     if ! "${pac[@]}" -Sp --print-format '%r/%n %f' "${selection[@]}" >>"$work/resolved"; then
       die "package set cannot resolve (hardware: %s; browser: %s)" "${sections[*]}" "$browser"

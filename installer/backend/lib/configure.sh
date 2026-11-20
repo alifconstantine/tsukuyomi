@@ -54,7 +54,7 @@ EOF
   if [[ -f "$TSUKUYOMI_SHARE/os/lsb-release" ]]; then
     run install -m 0644 "$TSUKUYOMI_SHARE/os/lsb-release" /mnt/etc/lsb-release
   fi
-  # Ensure i2c-dev loads for end-4 DDC/brightness integration
+  # Ensure i2c-dev loads for DDC/brightness integration
   run mkdir -p /mnt/etc/modules-load.d
   write_file /mnt/etc/modules-load.d/i2c-dev.conf <<'EOF'
 i2c-dev
