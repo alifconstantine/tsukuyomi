@@ -14,8 +14,23 @@ if [[ ! -e $qt_palette && -r $qt_config ]] &&
     fi
 fi
 
+export TSUKUYOMI_SOFTWARE_RENDERER=0
+if [[ -n ${XDG_RUNTIME_DIR:-} && -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    compositor_runtime="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE"
+    renderer_log="$compositor_runtime/hyprland.log"
+    software_pattern='[[:space:]]Renderer: (llvmpipe|softpipe)([ (]|$)'
+    # Mixed or unidentified renderers keep the regular graphics profile.
+    if [[ -r $renderer_log ]] && grep -qiE "$software_pattern" "$renderer_log" &&
+        ! grep -iE '[[:space:]]Renderer: ' "$renderer_log" | grep -qivE "$software_pattern"; then
+        if printf '1\n' > "$compositor_runtime/tsukuyomi-software-renderer"; then
+            export TSUKUYOMI_SOFTWARE_RENDERER=1
+            hyprctl reload config-only >/dev/null || true
+        fi
+    fi
+fi
+
 dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY \
     HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_ID \
-    QT_QPA_PLATFORMTHEME RYOKU_WM
+    QT_QPA_PLATFORMTHEME RYOKU_WM TSUKUYOMI_SOFTWARE_RENDERER
 systemctl --user start ryoku-session.target
 systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal-gtk.service
