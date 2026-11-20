@@ -14,16 +14,6 @@ if [[ ! -e $qt_palette && -r $qt_config ]] &&
     fi
 fi
 
-# KDE apps can apply a named scheme over the Qt palette. Register the same
-# file the desktop theme updates so Dolphin follows the current KDE colors.
-schemes="${XDG_DATA_HOME:-"$HOME/.local/share"}/color-schemes"
-if [[ -r "$config_home/kdeglobals" && ! -e "$schemes/Tsukuyomi.colors" && ! -L "$schemes/Tsukuyomi.colors" ]]; then
-    if mkdir -p -- "$schemes"; then
-        ln -sT -- "$config_home/kdeglobals" "$schemes/Tsukuyomi.colors" ||
-            echo 'Could not register the default KDE color scheme.' >&2
-    fi
-fi
-
 dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY \
     HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_ID \
     QT_QPA_PLATFORMTHEME RYOKU_WM

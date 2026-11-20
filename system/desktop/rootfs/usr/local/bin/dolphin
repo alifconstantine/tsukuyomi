@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+# Dolphin 26.08 can keep Qt's startup text color after applying a window
+# scheme. Start with a light Qt palette when using the shipped light scheme.
+if [[ $(kreadconfig6 --file dolphinrc --group UiSettings --key ColorScheme) == TsukuyomiLight ]]; then
+    exec /usr/bin/dolphin -platformtheme generic "$@"
+fi
+exec /usr/bin/dolphin "$@"
