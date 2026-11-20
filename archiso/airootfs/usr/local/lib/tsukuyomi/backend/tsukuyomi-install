@@ -51,7 +51,7 @@ install_active=0
 cleanup() {
   local status=$1
   if (( status != 0 && install_active == 1 )); then
-    tsukuyomi_cleanup_mounts
+    tsukuyomi_cleanup_mounts || true
   fi
   if [[ -n $TSUKUYOMI_PKG_WORK ]]; then
     rm -rf -- "$TSUKUYOMI_PKG_WORK"

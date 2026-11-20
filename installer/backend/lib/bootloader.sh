@@ -118,5 +118,6 @@ tsukuyomi_bootloader() {
 
 tsukuyomi_finalize() {
   log "unmounting target filesystems cleanly"
-  tsukuyomi_cleanup_mounts
+  run sync -f /mnt /mnt/boot
+  tsukuyomi_cleanup_mounts || die "could not unmount or close the installed filesystems"
 }

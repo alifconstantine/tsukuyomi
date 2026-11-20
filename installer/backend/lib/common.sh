@@ -86,9 +86,9 @@ tsukuyomi_cleanup_mounts() {
   [[ -n ${TSUKUYOMI_DRYRUN:-} ]] && return 0
   swapoff -a 2>/dev/null || true
   if mountpoint -q /mnt; then
-    umount -R /mnt 2>/dev/null || true
+    umount -R /mnt || return
   fi
   if [[ -e /dev/mapper/root ]]; then
-    cryptsetup close root 2>/dev/null || true
+    cryptsetup close root
   fi
 }
