@@ -60,6 +60,7 @@ done
 install -Dm644 "$work/upstream/usr/lib/udev/rules.d/90-ryoku-gpu.rules" \
     "$payload/usr/lib/udev/rules.d/90-ryoku-gpu.rules"
 ln -s /usr/local/bin/tsukuyomi-lock "$payload/usr/bin/ryoku-qylock-lock"
+ln -s /usr/share/tsukuyomi/lockscreen/theme-config.sh "$payload/usr/bin/tsukuyomi-lock-theme"
 ln -s lockscreen "$payload/usr/share/tsukuyomi/quickshell-lockscreen"
 cp -a "$root/system/desktop/rootfs/." "$payload/"
 install -Dm644 "$shell_src/ryoku/upstream/LICENSE" "$payload/usr/share/licenses/tsukuyomi-ryoku-desktop/LICENSE"

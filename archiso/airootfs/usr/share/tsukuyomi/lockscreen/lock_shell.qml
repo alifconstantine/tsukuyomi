@@ -15,7 +15,15 @@ ShellRoot {
     id: shellRoot
 
     property string activeTheme: Quickshell.env("QS_THEME") || "clockwork/orbital"
-    property string themePath: Quickshell.env("QS_THEME_PATH") || "/usr/share/sddm/themes/tsukuyomi/theme"
+    readonly property string stockThemePath: Quickshell.env("TSUKUYOMI_STOCK_LOCK_PATH") || "/usr/share/sddm/themes/tsukuyomi/theme"
+    property string themePath: Quickshell.env("QS_THEME_PATH") || stockThemePath
+
+    function restoreStockTheme() {
+        if (themePath === stockThemePath)
+            return
+        activeTheme = "clockwork/orbital"
+        themePath = stockThemePath
+    }
 
     // ── shim interface ──────────────────────────────────────────────────────
     // Expose the SddmShim's properties to the theme via the sddm namespace.
@@ -241,7 +249,8 @@ ShellRoot {
             }
             onStatusChanged: {
                 if (status === Loader.Error) {
-                    console.error("FAILED to load theme:", source)
+                    console.error("Failed to load lockscreen theme:", source)
+                    Qt.callLater(shellRoot.restoreStockTheme)
                 }
             }
         }

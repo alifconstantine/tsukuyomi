@@ -3,6 +3,7 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$DIR/theme-config.sh"
 
 resolve_session_id() {
     local sid="" candidate="" st="" cls="" typ=""
@@ -84,15 +85,25 @@ if [[ $XDG_SESSION_TYPE != wayland ]]; then
     exit 1
 fi
 
-if [[ -n ${1:-} && -f "$1/Main.qml" ]]; then
-    export QS_THEME_PATH="$1"
-elif [[ -f "$DIR/theme/Main.qml" ]]; then
-    export QS_THEME_PATH="$DIR/theme"
+if [[ -f "$DIR/theme/Main.qml" ]]; then
+    export TSUKUYOMI_STOCK_LOCK_PATH="$DIR/theme"
 elif [[ -f "/usr/share/sddm/themes/tsukuyomi/theme/Main.qml" ]]; then
-    export QS_THEME_PATH="/usr/share/sddm/themes/tsukuyomi/theme"
+    export TSUKUYOMI_STOCK_LOCK_PATH="/usr/share/sddm/themes/tsukuyomi/theme"
 else
     echo "tsukuyomi-lock: clockwork/orbital theme not found" >&2
     exit 1
+fi
+
+selected_theme=${1:-}
+if [[ -z $selected_theme && -r $lock_theme_pref ]]; then
+    IFS= read -r selected_theme < "$lock_theme_pref" || true
+fi
+export QS_THEME="$stock_lock_theme" QS_THEME_PATH="$TSUKUYOMI_STOCK_LOCK_PATH"
+if [[ -n ${1:-} && -f "$1/Main.qml" ]]; then
+    export QS_THEME_PATH="$1"
+elif [[ -n $selected_theme && $selected_theme != "$stock_lock_theme" ]] &&
+        selected_path=$(installed_lock_theme_path "$selected_theme" 2>/dev/null); then
+    export QS_THEME="$selected_theme" QS_THEME_PATH="$selected_path"
 fi
 
 killall -9 hyprlock swaylock wlogout 2>/dev/null || true
@@ -115,6 +126,12 @@ while :; do
     proof_token=""
     session_alive || exit 0
     (( rc == 0 )) && exit 0
+
+    if [[ $QS_THEME_PATH != "$TSUKUYOMI_STOCK_LOCK_PATH" ]]; then
+        echo "tsukuyomi-lock: falling back after a theme failure" >&2
+        export QS_THEME="$stock_lock_theme" QS_THEME_PATH="$TSUKUYOMI_STOCK_LOCK_PATH"
+        continue
+    fi
 
     if (( lifetime_ns >= 2000000000 )); then
         short_failures=0
