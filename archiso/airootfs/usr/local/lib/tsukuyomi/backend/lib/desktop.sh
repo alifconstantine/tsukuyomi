@@ -112,6 +112,14 @@ EOF
   # Point default web browser if one was selected
   tsukuyomi_set_default_browser "$user"
 
+  if [[ ${TSUKUYOMI_FLATPAK:-false} == true ]]; then
+    log "registering the Flathub system remote"
+    if ! run arch-chroot /mnt flatpak remote-add --system --from --if-not-exists \
+      flathub /usr/share/tsukuyomi/flathub.flatpakrepo; then
+      log "Flathub setup can be retried from Tsukuyomi Store after login"
+    fi
+  fi
+
   local -a enable_services=(
     sddm.service
     NetworkManager.service

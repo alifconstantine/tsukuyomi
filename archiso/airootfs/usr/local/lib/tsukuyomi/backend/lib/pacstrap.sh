@@ -61,8 +61,8 @@ tsukuyomi_hooks_quiet() {
 
 # Build and install use the same package selection, including explicit driver profiles.
 tsukuyomi_collect_packages() {
-  local pkg_dir=$1 browser=$2 sec
-  shift 2
+  local pkg_dir=$1 browser=$2 flatpak=$3 sec
+  shift 3
   {
     cat "$pkg_dir/base.packages"
     printf '%s\n' tsukuyomi-local/tsukuyomi-ryoku-desktop
@@ -70,6 +70,7 @@ tsukuyomi_collect_packages() {
       read_pkg_section "$pkg_dir/hardware.packages" "$sec"
     done
     [[ -z $browser || $browser == none ]] || printf '%s\n' "$browser"
+    [[ $flatpak != true ]] || printf '%s\n' flatpak
   } | awk '{ sub(/#.*/, ""); gsub(/[[:space:]]/, ""); if (length && !seen[$0]++) print }'
 }
 
@@ -114,7 +115,7 @@ tsukuyomi_packages_prepare() {
   for manifest in base.packages hardware.packages; do
     [[ -r "$pkg_dir/$manifest" ]] || die "missing package list: %s" "$pkg_dir/$manifest"
   done
-  packages=$(tsukuyomi_collect_packages "$pkg_dir" "${TSUKUYOMI_BROWSER:-none}" "${hw_sections[@]}")
+  packages=$(tsukuyomi_collect_packages "$pkg_dir" "${TSUKUYOMI_BROWSER:-none}" "${TSUKUYOMI_FLATPAK:-false}" "${hw_sections[@]}")
   mapfile -t TSUKUYOMI_TARGET_PACKAGES <<<"$packages"
 
   if [[ -n ${TSUKUYOMI_DRYRUN:-} ]]; then

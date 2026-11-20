@@ -48,14 +48,16 @@ for ((mask=1; mask < 1 << ${#hardware[@]}; mask++)); do
     (( mask & (1 << i) )) && sections+=("${hardware[i]}")
   done
   for browser in "${browsers[@]}"; do
-    targets=$(tsukuyomi_collect_packages "$pkg_dir" "$browser" "${sections[@]}")
-    plan="$work/plan-$mask-$browser"
-    printf '%s\n' "$targets" >"$plan"
-    mapfile -t selection <"$plan"
-    if ! "${pac[@]}" -Sp --print-format '%r/%n %f' "${selection[@]}" >>"$work/resolved"; then
-      die "package set cannot resolve (hardware: %s; browser: %s)" "${sections[*]}" "$browser"
-    fi
-    plans+=("$plan")
+    for flatpak in false true; do
+      targets=$(tsukuyomi_collect_packages "$pkg_dir" "$browser" "$flatpak" "${sections[@]}")
+      plan="$work/plan-$mask-$browser-$flatpak"
+      printf '%s\n' "$targets" >"$plan"
+      mapfile -t selection <"$plan"
+      if ! "${pac[@]}" -Sp --print-format '%r/%n %f' "${selection[@]}" >>"$work/resolved"; then
+        die "package set cannot resolve (hardware: %s; browser: %s; Flatpak: %s)" "${sections[*]}" "$browser" "$flatpak"
+      fi
+      plans+=("$plan")
+    done
   done
 done
 

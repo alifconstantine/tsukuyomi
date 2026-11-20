@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -47,6 +48,14 @@ func TestDryRunWizardTransition(t *testing.T) {
 	nm := next.(model)
 	if nm.state != stepBrowser {
 		t.Fatalf("expected state browser after network, got %s", nm.state)
+	}
+	if !nm.flatpak || !slices.Contains(buildInstallEnv(nm), "TSUKUYOMI_FLATPAK=true") {
+		t.Fatal("expected the recommended Flatpak selection to reach the backend")
+	}
+	toggled, _ := nm.onKey("space")
+	nm = toggled.(model)
+	if nm.flatpak || !slices.Contains(buildInstallEnv(nm), "TSUKUYOMI_FLATPAK=false") {
+		t.Fatal("expected skipping Flatpak to reach the backend")
 	}
 	next, _ = nm.onKey("enter") // -> disk
 	if next.(model).state != stepDisk {

@@ -143,6 +143,7 @@ type model struct {
 
 	// Browser
 	browserCursor int
+	flatpak       bool
 
 	// Disk & storage
 	disks      []diskInfo
@@ -197,6 +198,7 @@ func initialModel(dryRun bool) model {
 		wifiNets:      nets,
 		wifiNotice:    wifiNote,
 		browserCursor: 0, // Brave (Recommended)
+		flatpak:       true,
 		disks:         disks,
 		snapshots:     true,
 		swapIdx:       1, // 4 GiB default
@@ -497,6 +499,8 @@ func (m model) keyBrowser(k string) (tea.Model, tea.Cmd) {
 		if m.browserCursor < len(browsers)-1 {
 			m.browserCursor++
 		}
+	case "space", " ":
+		m.flatpak = !m.flatpak
 	case "enter":
 		m.state = stepDisk
 	}
@@ -775,6 +779,13 @@ func (m model) selectedBrowser() browserChoice {
 
 func (m model) selectedBrowserPkg() string {
 	return m.selectedBrowser().pkg
+}
+
+func (m model) flatpakSelection() string {
+	if m.flatpak {
+		return "Enabled"
+	}
+	return "Skipped"
 }
 
 func (m model) selectedDiskPath() string {
@@ -1132,6 +1143,8 @@ func (m model) viewBrowser(innerW int) string {
 		}
 		lines = append(lines, fg(cMuted, "    "+truncStr(b.hint, max(innerW-6, 20))))
 	}
+	lines = append(lines, "", boldFg(cCrimson, "Flatpak + Flathub"), fg(cText, m.flatpakSelection())+
+		fg(cMuted, " · Space toggles"))
 	return strings.Join(lines, "\n")
 }
 
@@ -1205,6 +1218,7 @@ func (m model) viewReview() string {
 		kv("Locale / Keymap", fmt.Sprintf("%s · %s", m.selectedLocale(), m.selectedKeymap())),
 		kv("Timezone", m.selectedTimezone()),
 		kv("Web Browser", m.selectedBrowser().label+" ("+m.selectedBrowserPkg()+")"),
+		kv("Flatpak + Flathub", m.flatpakSelection()),
 		kv("Target Disk", m.selectedDiskPath()+" (GPT: 1G Limine ESP + Btrfs)"),
 		kv("Encryption", encStr),
 		kv("Snapshots / Swap", fmt.Sprintf("%s · %d GiB swapfile", snapStr, swapChoices[m.swapIdx])),
@@ -1288,7 +1302,7 @@ func (m model) renderFooter(w int) string {
 	case stepNetwork:
 		hint = "↑/↓ select · c connect · r rescan · enter next · esc back"
 	case stepBrowser:
-		hint = "↑/↓ choose browser · enter next · esc back"
+		hint = "↑/↓ choose browser · space toggle Flatpak · enter next · esc back"
 	case stepDisk:
 		hint = "tab field · space toggle · ctrl+n next · esc back"
 	case stepIdentity:
