@@ -2,23 +2,35 @@
 set -uo pipefail
 export RYOKU_WM=hyprland XDG_CURRENT_DESKTOP=Hyprland
 
-# Older releases copied the default bindings into each home.
-binds="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/modules/binds.lua"
-packaged_binds=/usr/share/ryoku/config/hypr/modules/binds.lua
-if [[ -f $binds && ! -L $binds && -r $packaged_binds ]]; then
-    sum=$(sha256sum < "$binds")
-    case ${sum%% *} in
-        0810666b0dd3d6edc18ae37aa5a6aef1c7eea1c13a28bb33f2a5f2a549ce0771|\
-        84c08dc94e34e658f57c41ec8bd906714525dd5535c84f4b3effbf38feb7ddd7)
-            if pending=$(mktemp -d -- "${binds%/*}/.binds.XXXXXXXX"); then
-                ln -s -- "$packaged_binds" "$pending/binds.lua" &&
-                    mv -fT -- "$pending/binds.lua" "$binds"
-                if [[ -L $pending/binds.lua ]]; then unlink -- "$pending/binds.lua"; fi
-                rmdir -- "$pending"
-            fi
-            ;;
-    esac
-fi
+# Older releases copied the defaults into each home.
+adopt_shipped_module() {
+    local module=$1
+    shift
+    local module_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/modules"
+    local current="$module_dir/$module.lua"
+    local packaged="/usr/share/ryoku/config/hypr/modules/$module.lua"
+    local sum expected pending
+
+    [[ -f $current && ! -L $current && -r $packaged ]] || return 0
+    sum=$(sha256sum < "$current") || return 0
+    for expected in "$@"; do
+        [[ ${sum%% *} == "$expected" ]] || continue
+        if pending=$(mktemp -d -- "$module_dir/.$module.XXXXXXXX"); then
+            ln -s -- "$packaged" "$pending/$module.lua" &&
+                mv -fT -- "$pending/$module.lua" "$current"
+            if [[ -L $pending/$module.lua ]]; then unlink -- "$pending/$module.lua"; fi
+            rmdir -- "$pending"
+        fi
+        break
+    done
+}
+
+adopt_shipped_module binds \
+    0810666b0dd3d6edc18ae37aa5a6aef1c7eea1c13a28bb33f2a5f2a549ce0771 \
+    84c08dc94e34e658f57c41ec8bd906714525dd5535c84f4b3effbf38feb7ddd7
+adopt_shipped_module window_rules \
+    1d0443b2c32a540b7da535f63c3e91b6f32eb2d151641a2d97455f19d662c2c7 \
+    a8cb66ae0c5a583509dfe84b0d77dacd4d2afc94a68f773d90de81f2da1e11ed
 
 trap 'systemctl --user stop ryoku-session.target' EXIT
 start-hyprland "$@"
