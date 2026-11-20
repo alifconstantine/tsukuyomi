@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -uo pipefail
 export RYOKU_WM=hyprland XDG_CURRENT_DESKTOP=Hyprland
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+for exports in "${XDG_DATA_HOME:-$HOME/.local/share}/flatpak/exports/share" /var/lib/flatpak/exports/share; do
+    case ":$XDG_DATA_DIRS:" in
+        *":$exports:"*) ;;
+        *) XDG_DATA_DIRS="$XDG_DATA_DIRS:$exports" ;;
+    esac
+done
+
 # Older releases copied the defaults into each home.
 adopt_shipped_module() {
     local module=$1

@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+remote_file=/usr/share/tsukuyomi/flathub.flatpakrepo
+
+has_flathub() {
+    local remotes
+    remotes=$(flatpak remotes "$1" --columns=name,url) || return 1
+    awk '$1 == "flathub" && $2 ~ /^https:\/\/dl\.flathub\.org\/repo\/?$/ { found = 1 } END { exit !found }' <<<"$remotes"
+}
+
+status() {
+    if ! command -v flatpak >/dev/null; then
+        echo missing
+        return
+    fi
+
+    if has_flathub --system || has_flathub --user; then
+        echo ready
+    else
+        echo remote
+    fi
+}
+
+setup() {
+    if [[ $(status) == missing ]]; then
+        printf 'Flatpak is installed through the system package manager. Review the system update before confirming.\n'
+        sudo pacman -Syu --needed flatpak || return
+    fi
+    if [[ $(status) == ready ]]; then
+        return
+    fi
+    if ! sudo flatpak remote-add --system --from --if-not-exists flathub "$remote_file"; then
+        printf 'Could not set up the Flathub remote.\n' >&2
+        return 1
+    fi
+    if [[ $(status) != ready ]]; then
+        printf 'A Flathub remote already exists with different settings or is disabled. Review it in Flatpak before trying again.\n' >&2
+        return 1
+    fi
+}
+
+run_transaction() {
+    local operation=$1 app_id=$2 scope=$3
+    if [[ ! $app_id =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$ ]]; then
+        printf 'Invalid Flatpak application ID.\n' >&2
+        return 1
+    fi
+    if [[ $operation == install && -z $scope ]]; then
+        if has_flathub --system; then
+            scope=system
+        else
+            scope=user
+        fi
+    fi
+    if [[ $scope != system && $scope != user ]] || ! has_flathub "--$scope"; then
+        printf 'Set up the official Flathub remote in Store → Apps.\n' >&2
+        return 1
+    fi
+    if [[ $operation != install && $(flatpak info "--$scope" --show-origin "$app_id") != flathub ]]; then
+        printf 'This application is not installed from Flathub.\n' >&2
+        return 1
+    fi
+    # The Store action already confirmed the operation. Leave Polkit's native
+    # authentication enabled for system installations and updates.
+    printf 'RYOSTORE-PROGRESS apply 0 0\n' >&2
+    case "$operation" in
+        install) exec flatpak install "--$scope" --assumeyes flathub "$app_id" ;;
+        update) exec flatpak update "--$scope" --assumeyes "$app_id" ;;
+        remove) exec flatpak uninstall "--$scope" --assumeyes "$app_id" ;;
+    esac
+}
+
+case "${1:-}" in
+    status)
+        status
+        case "$(LC_ALL=C nmcli -t -f STATE general 2>/dev/null || true)" in
+            disconnected|asleep) echo offline ;;
+        esac
+        ;;
+    setup)
+        if setup; then
+            printf 'Flathub is ready.\n'
+        else
+            printf 'Setup did not finish.\n' >&2
+            read -r -p 'Press Enter to return to the Store.' || true
+            exit 1
+        fi
+        ;;
+    install|update|remove) run_transaction "$1" "${2:-}" "${3:-}" ;;
+    *) printf 'Usage: %s status|setup|install|update|remove\n' "${0##*/}" >&2; exit 2 ;;
+esac

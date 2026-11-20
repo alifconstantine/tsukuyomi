@@ -31,6 +31,6 @@ fi
 
 dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY \
     HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_ID \
-    QT_QPA_PLATFORMTHEME RYOKU_WM TSUKUYOMI_SOFTWARE_RENDERER
+    QT_QPA_PLATFORMTHEME RYOKU_WM TSUKUYOMI_SOFTWARE_RENDERER XDG_DATA_DIRS
 systemctl --user start ryoku-session.target
 systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal-gtk.service
