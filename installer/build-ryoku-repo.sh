@@ -51,8 +51,9 @@ mv "$work/profile/.config/"{hypr,quickshell} "$data/config/"
 cp -a "$work/profile/." "$skel/"
 cp -a "$data/config/"{hypr,matugen,qt6ct} "$skel/.config/"
 ln -s /usr/share/ryoku/config/quickshell "$skel/.config/quickshell"
+install -Dm644 "$shell_src/ryoku/tsukuyomi-store.desktop" "$payload/usr/share/applications/tsukuyomi-store.desktop"
 
-for helper in ryoku-monitor ryoku-wm-hyprland ryoku-workspace ryoku-bt-audio \
+for helper in ryostore ryostore-install ryoku-monitor ryoku-wm-hyprland ryoku-workspace ryoku-bt-audio \
     ryoku-bluetooth-power ryoku-bluetooth-reset ryoku-media ryoku-volume ryoku-gpu ryoku-gpu-detect; do
     install -m 755 "$work/upstream/usr/bin/$helper" "$payload/usr/bin/"
 done
