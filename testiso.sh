@@ -11,8 +11,11 @@ DISK_SIZE="${TSUKUYOMI_VM_DISK:-32G}"
 RAM_MB="${TSUKUYOMI_VM_RAM:-4096}"
 CPUS="${TSUKUYOMI_VM_CPUS:-4}"
 
-iso_path=$(ls -t "$OUT_DIR"/*.iso 2>/dev/null | head -n1 || true)
+iso_path=${TSUKUYOMI_VM_ISO:-}
 if [[ -z $iso_path ]]; then
+  iso_path=$(ls -t "$OUT_DIR"/*.iso 2>/dev/null | head -n1 || true)
+fi
+if [[ ! -f $iso_path ]]; then
   echo "testiso.sh: no ISO found in $OUT_DIR (run ./buildiso.sh first)" >&2
   exit 1
 fi
