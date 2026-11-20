@@ -50,6 +50,7 @@ cp -a "$work/upstream/usr/lib/qt6/qml/Ryoku" "$payload/usr/lib/qt6/qml/"
 mv "$work/profile/.config/"{hypr,quickshell} "$data/config/"
 cp -a "$work/profile/." "$skel/"
 cp -a "$data/config/"{hypr,matugen,qt6ct} "$skel/.config/"
+ln -sfn /usr/share/ryoku/config/hypr/modules/binds.lua "$skel/.config/hypr/modules/binds.lua"
 ln -s /usr/share/ryoku/config/quickshell "$skel/.config/quickshell"
 install -Dm644 "$shell_src/ryoku/tsukuyomi-store.desktop" "$payload/usr/share/applications/tsukuyomi-store.desktop"
 

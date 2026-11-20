@@ -1,5 +1,24 @@
 #!/usr/bin/env bash
 set -uo pipefail
 export RYOKU_WM=hyprland XDG_CURRENT_DESKTOP=Hyprland
+
+# Older releases copied the default bindings into each home.
+binds="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/modules/binds.lua"
+packaged_binds=/usr/share/ryoku/config/hypr/modules/binds.lua
+if [[ -f $binds && ! -L $binds && -r $packaged_binds ]]; then
+    sum=$(sha256sum < "$binds")
+    case ${sum%% *} in
+        0810666b0dd3d6edc18ae37aa5a6aef1c7eea1c13a28bb33f2a5f2a549ce0771|\
+        84c08dc94e34e658f57c41ec8bd906714525dd5535c84f4b3effbf38feb7ddd7)
+            if pending=$(mktemp -d -- "${binds%/*}/.binds.XXXXXXXX"); then
+                ln -s -- "$packaged_binds" "$pending/binds.lua" &&
+                    mv -fT -- "$pending/binds.lua" "$binds"
+                if [[ -L $pending/binds.lua ]]; then unlink -- "$pending/binds.lua"; fi
+                rmdir -- "$pending"
+            fi
+            ;;
+    esac
+fi
+
 trap 'systemctl --user stop ryoku-session.target' EXIT
 start-hyprland "$@"
