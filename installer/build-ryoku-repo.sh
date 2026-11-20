@@ -68,6 +68,7 @@ install -m 644 "$root/system/desktop/autostart.lua" "$skel/.config/hypr/modules/
 install -m 644 "$root/system/desktop/hypridle.conf" "$skel/.config/hypr/"
 for hypr in "$data/config/hypr" "$skel/.config/hypr"; do
     sed -i 's/Ryoku Settings/Tsukuyomi Hub/g' "$hypr/modules/window_rules.lua"
+    sed -i '/hl\.dsp\.global("ryoku:ask")/d; /ryoku-summon Rashin /d' "$hypr/modules/binds.lua"
 done
 
 cp "$root/packages/pkgbuilds/tsukuyomi-ryoku-desktop/PKGBUILD" "$work/build/"

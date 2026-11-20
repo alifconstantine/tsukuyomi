@@ -1,5 +1,5 @@
 [Unit]
-Description=Ryoku desktop shell
+Description=Tsukuyomi desktop shell
 PartOf=ryoku-session.target
 ConditionEnvironment=WAYLAND_DISPLAY
 
