@@ -45,9 +45,9 @@ data="$payload/usr/share/ryoku"
 skel="$payload/usr/share/tsukuyomi/ryoku/skel"
 mkdir -p "$data/config" "$payload/usr/lib/qt6/qml" "$payload/usr/bin" "$skel"
 cp -a "$upstream/brand" "$upstream/i18n" "$data/"
-cp -a "$upstream/config/"{hypr,matugen,qt6ct} "$data/config/"
+cp -a "$upstream/config/"{matugen,qt6ct} "$data/config/"
 cp -a "$work/upstream/usr/lib/qt6/qml/Ryoku" "$payload/usr/lib/qt6/qml/"
-mv "$work/profile/.config/quickshell" "$data/config/"
+mv "$work/profile/.config/"{hypr,quickshell} "$data/config/"
 cp -a "$work/profile/." "$skel/"
 cp -a "$data/config/"{hypr,matugen,qt6ct} "$skel/.config/"
 ln -s /usr/share/ryoku/config/quickshell "$skel/.config/quickshell"
@@ -66,10 +66,6 @@ install -Dm644 "$shell_src/ryoku/upstream/NOTICE" "$payload/usr/share/licenses/t
 install -m 644 "$root/system/desktop/autostart.lua" "$data/config/hypr/modules/autostart.lua"
 install -m 644 "$root/system/desktop/autostart.lua" "$skel/.config/hypr/modules/autostart.lua"
 install -m 644 "$root/system/desktop/hypridle.conf" "$skel/.config/hypr/"
-for hypr in "$data/config/hypr" "$skel/.config/hypr"; do
-    sed -i 's/Ryoku Settings/Tsukuyomi Hub/g' "$hypr/modules/window_rules.lua"
-    sed -i '/hl\.dsp\.global("ryoku:ask")/d; /ryoku-summon Rashin /d' "$hypr/modules/binds.lua"
-done
 
 cp "$root/packages/pkgbuilds/tsukuyomi-ryoku-desktop/PKGBUILD" "$work/build/"
 (cd "$work/build" && PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
