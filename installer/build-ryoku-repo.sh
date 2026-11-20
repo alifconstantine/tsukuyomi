@@ -31,7 +31,8 @@ for archive in "$work/archives/"*.pkg.tar.zst; do
             bsdtar -xf "$archive" -C "$work/upstream" usr/bin usr/share/ryoku/config ;;
         ryoku-desktop-*)
             bsdtar -xf "$archive" -C "$work/upstream" \
-                usr/bin usr/lib/qt6/qml/Ryoku usr/share/ryoku/config \
+                usr/bin usr/lib/qt6/qml/Ryoku usr/lib/udev/rules.d/90-ryoku-gpu.rules \
+                usr/share/ryoku/config \
                 usr/share/ryoku/brand usr/share/ryoku/i18n ;;
         *) mv -- "$archive" "$work/repo/" ;;
     esac
@@ -52,9 +53,11 @@ cp -a "$data/config/"{hypr,matugen,qt6ct} "$skel/.config/"
 ln -s /usr/share/ryoku/config/quickshell "$skel/.config/quickshell"
 
 for helper in ryoku-monitor ryoku-wm-hyprland ryoku-workspace ryoku-bt-audio \
-    ryoku-bluetooth-power ryoku-bluetooth-reset ryoku-media ryoku-volume ryoku-gpu-detect; do
+    ryoku-bluetooth-power ryoku-bluetooth-reset ryoku-media ryoku-volume ryoku-gpu ryoku-gpu-detect; do
     install -m 755 "$work/upstream/usr/bin/$helper" "$payload/usr/bin/"
 done
+install -Dm644 "$work/upstream/usr/lib/udev/rules.d/90-ryoku-gpu.rules" \
+    "$payload/usr/lib/udev/rules.d/90-ryoku-gpu.rules"
 ln -s /usr/local/bin/tsukuyomi-lock "$payload/usr/bin/ryoku-qylock-lock"
 ln -s lockscreen "$payload/usr/share/tsukuyomi/quickshell-lockscreen"
 cp -a "$root/system/desktop/rootfs/." "$payload/"
