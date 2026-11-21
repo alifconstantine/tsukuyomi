@@ -50,9 +50,6 @@ mkdir -p "$data/config" "$payload/usr/lib/qt6/qml" "$payload/usr/bin" "$skel"
 cp -a "$upstream/brand" "$upstream/i18n" "$data/"
 cp -a "$upstream/config/"{matugen,qt6ct} "$data/config/"
 cp -a "$work/upstream/usr/lib/qt6/qml/Ryoku" "$payload/usr/lib/qt6/qml/"
-for change in "$shell_src"/ryoku/ui-patches/*.patch; do
-    patch --batch --forward --fuzz=0 -d "$payload/usr/lib/qt6/qml/Ryoku/Ui" -p1 < "$change"
-done
 mv "$work/profile/.config/"{hypr,quickshell} "$data/config/"
 cp -a "$work/profile/." "$skel/"
 cp -a "$data/config/"{hypr,matugen,qt6ct} "$skel/.config/"
