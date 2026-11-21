@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 state="${XDG_STATE_HOME:-$HOME/.local/state}/tsukuyomi"
-wallpaper="$HOME/Pictures/Wallpapers/Black Hole.webp"
+wallpaper="$HOME/Pictures/Wallpapers/cloud-valley.webp"
 [[ -r $wallpaper && ! -e $state/wallpaper-initialized ]] || exit 0
 
 for attempt in {1..40}; do

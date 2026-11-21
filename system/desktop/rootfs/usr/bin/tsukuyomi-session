@@ -48,12 +48,16 @@ seed_picker_defaults() {
     local pending
 
     [[ -f $config && ! -L $config ]] || return 0
-    if jq -e '.selector.livePreview != null and .performance.maxThumbJobs != null' "$config" >/dev/null 2>&1; then
+    if jq -e '
+        .selector.livePreview != null and .performance.maxThumbJobs != null
+        and .transition.shader != null and .transition.durationMs != null and .transition.preview != null
+    ' "$config" >/dev/null 2>&1; then
         return 0
     fi
 
     pending=$(mktemp -- "${config}.XXXXXXXX") || return 0
-    if jq 'select(type == "object") | .selector.livePreview //= false | .performance.maxThumbJobs //= 4' \
+    if jq 'select(type == "object") | .selector.livePreview //= false | .performance.maxThumbJobs //= 4
+        | .transition = ({shader: "crossfade", durationMs: 200, preview: false} + (.transition // {}))' \
         "$config" > "$pending" && [[ -s $pending ]]; then
         mv -fT -- "$pending" "$config"
     fi
