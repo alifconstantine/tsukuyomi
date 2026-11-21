@@ -43,5 +43,24 @@ adopt_shipped_module window_rules \
     1d0443b2c32a540b7da535f63c3e91b6f32eb2d151641a2d97455f19d662c2c7 \
     a8cb66ae0c5a583509dfe84b0d77dacd4d2afc94a68f773d90de81f2da1e11ed
 
+seed_picker_defaults() {
+    local config="${XDG_CONFIG_HOME:-$HOME/.config}/ryoku/ryogami.json"
+    local pending
+
+    [[ -f $config && ! -L $config ]] || return 0
+    if jq -e '.selector.livePreview != null and .performance.maxThumbJobs != null' "$config" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    pending=$(mktemp -- "${config}.XXXXXXXX") || return 0
+    if jq 'select(type == "object") | .selector.livePreview //= false | .performance.maxThumbJobs //= 4' \
+        "$config" > "$pending" && [[ -s $pending ]]; then
+        mv -fT -- "$pending" "$config"
+    fi
+    [[ ! -f $pending ]] || unlink -- "$pending"
+}
+
+seed_picker_defaults
+
 trap 'systemctl --user stop ryoku-session.target' EXIT
 start-hyprland "$@"
