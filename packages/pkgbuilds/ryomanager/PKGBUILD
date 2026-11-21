@@ -1,0 +1,37 @@
+pkgname=ryomanager
+pkgver=0.1.0.r27.g459c671
+pkgrel=2
+pkgdesc='Tsukuyomi Monitor for system performance and processes'
+arch=('x86_64')
+url='https://github.com/Ryoku-dev/ryomanager'
+license=('GPL-3.0-only')
+depends=('gtk3' 'webkit2gtk-4.1')
+makedepends=('go' 'nodejs' 'npm' 'pkgconf')
+options=('!debug')
+_commit=459c6714e31276f73025369e722cf4ab48eccbc3
+source=("$pkgname-$_commit.tar.gz::https://codeload.github.com/Ryoku-dev/ryomanager/tar.gz/$_commit"
+        '01-tsukuyomi-monitor.patch' 'ryomanager.desktop')
+sha256sums=('60b83e0663166035a5f81fa456d543ceb324d6286b9699f37d8a47fa460c39f7'
+            '65b4b1a8074378763f9c78bf6a213b9f0a5855cdfab3194f454494f086d87f53'
+            '9c79f3a77e1c02bfa967f0530507fba01958f21658df8a16922a7b12dc5c61be')
+
+prepare() {
+    cd "$srcdir/$pkgname-$_commit"
+    patch --batch --forward --fuzz=0 -p1 < "$srcdir/01-tsukuyomi-monitor.patch"
+}
+
+build() {
+    cd "$srcdir/$pkgname-$_commit/frontend"
+    npm ci --prefer-offline --no-audit --no-fund
+    npm run build
+
+    cd ..
+    CGO_ENABLED=1 go build -trimpath -tags 'desktop,production,webkit2_41' \
+        -buildmode=pie -ldflags '-s -w' -o "$srcdir/$pkgname" .
+}
+
+package() {
+    install -Dm755 "$srcdir/$pkgname" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 "$srcdir/$pkgname.desktop" "$pkgdir/usr/share/applications/$pkgname.desktop"
+    install -Dm644 "$srcdir/$pkgname-$_commit/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

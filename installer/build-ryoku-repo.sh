@@ -89,6 +89,16 @@ sed -i 's/^Name=Ryogami Wallpapers$/Name=Tsukuyomi Wallpapers/' \
 cp "$root/packages/pkgbuilds/ryogami/PKGBUILD" "$wallpapers/"
 (cd "$wallpapers" && PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
 
+monitor="$work/monitor"
+mkdir -p "$monitor"
+cp "$root/packages/pkgbuilds/ryomanager/"{PKGBUILD,ryomanager.desktop} "$monitor/"
+cp "$shell_src/ryoku/monitor-patches/01-tsukuyomi-monitor.patch" "$monitor/"
+# makepkg caches the verified upstream archive between ISO builds.
+monitor_cache=${TSUKUYOMI_SOURCE_CACHE:-$root/repo/ryoku/source-cache}
+mkdir -p "$monitor_cache"
+monitor_cache=$(realpath -- "$monitor_cache")
+(cd "$monitor" && SRCDEST="$monitor_cache" PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
+
 cp "$root/packages/pkgbuilds/tsukuyomi-ryoku-desktop/PKGBUILD" "$work/build/"
 (cd "$work/build" && PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
 repo-add "$work/repo/tsukuyomi-local.db.tar.gz" "$work/repo/"*.pkg.tar.zst
