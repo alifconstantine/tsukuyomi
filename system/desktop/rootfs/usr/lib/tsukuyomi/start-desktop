@@ -34,3 +34,15 @@ dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY \
     QT_QPA_PLATFORMTHEME RYOKU_WM TSUKUYOMI_SOFTWARE_RENDERER XDG_DATA_DIRS
 systemctl --user start ryoku-session.target
 systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal-gtk.service
+
+if command -v ryoku-session-intro >/dev/null 2>&1; then
+    (
+        for _ in $(seq 1 30); do
+            if command -v ryoku-shell >/dev/null 2>&1 && ryoku-shell ping >/dev/null 2>&1; then
+                break
+            fi
+            sleep 0.5
+        done
+        exec ryoku-session-intro welcome
+    ) >/dev/null 2>&1 &
+fi

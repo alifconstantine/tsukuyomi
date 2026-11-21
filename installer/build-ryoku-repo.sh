@@ -65,7 +65,7 @@ ln -s /usr/share/ryoku/config/quickshell "$skel/.config/quickshell"
 install -Dm644 "$shell_src/ryoku/tsukuyomi-store.desktop" "$payload/usr/share/applications/tsukuyomi-store.desktop"
 
 for helper in ryostore ryostore-install ryoku-plugins-place ryoku-monitor ryoku-wm-hyprland ryoku-workspace ryoku-bt-audio \
-    ryoku-bluetooth-power ryoku-bluetooth-reset ryoku-media ryoku-volume ryoku-gpu ryoku-gpu-detect; do
+    ryoku-bluetooth-power ryoku-bluetooth-reset ryoku-media ryoku-volume ryoku-gpu ryoku-gpu-detect ryoku-session-intro; do
     install -m 755 "$work/upstream/usr/bin/$helper" "$payload/usr/bin/"
 done
 install -Dm644 "$work/upstream/usr/lib/udev/rules.d/90-ryoku-gpu.rules" \
