@@ -1,6 +1,6 @@
 pkgname=tsukuyomi-ryoku-desktop
 pkgver=1.0.9.r6109.g08ff328
-pkgrel=25
+pkgrel=26
 pkgdesc='Tsukuyomi desktop with the Ryoku shell and Hyprland provider'
 arch=('x86_64')
 url='https://github.com/alifconstantine/tsukuyomi-shell'

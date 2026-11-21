@@ -6,6 +6,7 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 shell_src=${TSUKUYOMI_SHELL_DIR:-$root/../tsukuyomi-shell}
 archive_cache=${TSUKUYOMI_RYOKU_CACHE:-/var/cache/pacman/pkg}
 out="$root/repo/ryoku/x86_64"
+source_cache=${TSUKUYOMI_SOURCE_CACHE:-$root/repo/ryoku/source-cache}
 [[ -x $shell_src/ryoku/stage-profile.sh ]] || { echo 'The Tsukuyomi shell checkout is required.' >&2; exit 1; }
 
 mkdir -p "$(dirname "$out")"
@@ -34,6 +35,9 @@ for archive in "$work/archives/"*.pkg.tar.zst; do
                 usr/bin usr/lib/qt6/qml/Ryoku usr/lib/udev/rules.d/90-ryoku-gpu.rules \
                 usr/share/ryoku/config \
                 usr/share/ryoku/brand usr/share/ryoku/i18n ;;
+        ryoku-shell-*)
+            mkdir -p "$work/ipc/payload"
+            bsdtar -xf "$archive" -C "$work/ipc/payload" usr ;;
         ryogami-*)
             mkdir -p "$work/wallpapers/payload"
             bsdtar -xf "$archive" -C "$work/wallpapers/payload" usr ;;
@@ -48,9 +52,9 @@ data="$payload/usr/share/ryoku"
 skel="$payload/usr/share/tsukuyomi/ryoku/skel"
 mkdir -p "$data/config" "$payload/usr/lib/qt6/qml" "$payload/usr/bin" "$skel"
 cp -a "$upstream/brand" "$upstream/i18n" "$data/"
-cp -a "$upstream/config/"{matugen,qt6ct} "$data/config/"
+cp -a "$upstream/config/qt6ct" "$data/config/"
 cp -a "$work/upstream/usr/lib/qt6/qml/Ryoku" "$payload/usr/lib/qt6/qml/"
-mv "$work/profile/.config/"{hypr,quickshell} "$data/config/"
+mv "$work/profile/.config/"{hypr,quickshell,matugen} "$data/config/"
 cp -a "$work/profile/." "$skel/"
 cp -a "$data/config/"{hypr,matugen,qt6ct} "$skel/.config/"
 for module in binds decoration perf_saver window_rules; do
@@ -77,24 +81,25 @@ install -m 644 "$root/system/desktop/autostart.lua" "$skel/.config/hypr/modules/
 install -m 644 "$root/system/desktop/hypridle.conf" "$skel/.config/hypr/"
 
 wallpapers="$work/wallpapers"
-for change in "$shell_src"/ryoku/wallpaper-patches/*.patch; do
-    patch --batch --forward --fuzz=0 \
-        -d "$wallpapers/payload/usr/lib/qt6/qml/Ryoku/Ryogami" -p1 < "$change"
-done
+"$shell_src/ryoku/stage-picker.sh" "$wallpapers/payload/usr/lib/qt6/qml/Ryoku/Ryogami"
 sed -i 's/^Name=Ryogami Wallpapers$/Name=Tsukuyomi Wallpapers/' \
     "$wallpapers/payload/usr/share/applications/ryogami.desktop"
 cp "$root/packages/pkgbuilds/ryogami/PKGBUILD" "$wallpapers/"
 (cd "$wallpapers" && PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
 
+# Cache the pinned daemon checkout and verified Monitor archive between builds.
+mkdir -p "$source_cache"
+source_cache=$(realpath -- "$source_cache")
+ipc="$work/ipc"
+"$shell_src/ryoku/build-shell.sh" "$ipc/payload/usr/bin/ryoku-shell" "$source_cache"
+cp "$root/packages/pkgbuilds/ryoku-shell/PKGBUILD" "$ipc/"
+(cd "$ipc" && PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
+
 monitor="$work/monitor"
 mkdir -p "$monitor"
 cp "$root/packages/pkgbuilds/ryomanager/"{PKGBUILD,ryomanager.desktop} "$monitor/"
 cp "$shell_src/ryoku/monitor-patches/01-tsukuyomi-monitor.patch" "$monitor/"
-# makepkg caches the verified upstream archive between ISO builds.
-monitor_cache=${TSUKUYOMI_SOURCE_CACHE:-$root/repo/ryoku/source-cache}
-mkdir -p "$monitor_cache"
-monitor_cache=$(realpath -- "$monitor_cache")
-(cd "$monitor" && SRCDEST="$monitor_cache" PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
+(cd "$monitor" && SRCDEST="$source_cache" PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
 
 cp "$root/packages/pkgbuilds/tsukuyomi-ryoku-desktop/PKGBUILD" "$work/build/"
 (cd "$work/build" && PKGDEST="$work/repo" makepkg --nodeps --noconfirm)

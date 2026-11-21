@@ -1,0 +1,20 @@
+pkgname=ryoku-shell
+pkgver=1.0.9.r6109.g08ff328
+pkgrel=2
+epoch=1
+pkgdesc='Tsukuyomi shell IPC daemon and Quickshell supervisor'
+arch=('x86_64')
+url='https://github.com/alifconstantine/tsukuyomi-shell'
+license=('GPL-3.0-or-later')
+depends=('quickshell' 'ffmpeg' 'wayland' 'jq' 'python' 'uv' 'socat' 'gum'
+         'qrencode' 'upower' 'brightnessctl' 'ddcutil' 'wtype' 'wl-clipboard'
+         'zenity' 'power-profiles-daemon' 'networkmanager' 'curl' 'libnotify'
+         'inotify-tools' 'easyeffects' 'lsp-plugins-lv2' 'calf')
+optdepends=('kdeconnect: share screenshots with your phone'
+            'git: build the optional pinned Shima runtime'
+            'qt6-imageformats: decode extra Shima image formats')
+options=('!strip' '!debug')
+
+package() {
+    cp -a "$startdir/payload/." "$pkgdir/"
+}
