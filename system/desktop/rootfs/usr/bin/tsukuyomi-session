@@ -51,14 +51,23 @@ seed_picker_defaults() {
     if jq -e '
         .selector.livePreview != null and .performance.maxThumbJobs != null
         and .transition.shader != null and .transition.durationMs != null and .transition.preview != null
+        and (.selector.livePreview != false or .transition != {"shader":"crossfade","durationMs":200,"preview":false})
     ' "$config" >/dev/null 2>&1; then
         return 0
     fi
 
     pending=$(mktemp -- "${config}.XXXXXXXX") || return 0
-    if jq 'select(type == "object") | .selector.livePreview //= false | .performance.maxThumbJobs //= 4
-        | .transition = ({shader: "crossfade", durationMs: 200, preview: false} + (.transition // {}))' \
-        "$config" > "$pending" && [[ -s $pending ]]; then
+    if jq '
+        select(type == "object")
+        | if (.selector.livePreview == false and .transition == {"shader":"crossfade","durationMs":200,"preview":false}) then
+            .selector.livePreview = true
+            | .transition = {"enabled": true, "family": "random", "shader": "random", "durationMs": 900, "preview": true}
+          else
+            .selector.livePreview //= true
+            | .transition = ({"enabled": true, "family": "random", "shader": "random", "durationMs": 900, "preview": true} + (.transition // {}))
+          end
+        | .performance.maxThumbJobs //= 4
+    ' "$config" > "$pending" && [[ -s $pending ]]; then
         mv -fT -- "$pending" "$config"
     fi
     [[ ! -f $pending ]] || unlink -- "$pending"
