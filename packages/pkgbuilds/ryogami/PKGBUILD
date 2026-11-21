@@ -1,0 +1,17 @@
+pkgname=ryogami
+pkgver=1.0.9.r6109.g08ff328
+pkgrel=2
+epoch=1
+pkgdesc='Tsukuyomi Wallpapers, based on the Ryogami wallpaper engine'
+arch=('x86_64')
+url='https://github.com/Ryoku-dev/ryoku'
+license=('GPL-3.0-or-later')
+depends=('imagemagick' 'ffmpeg' 'quickshell' 'qt6-imageformats' 'skwd-paper-bin'
+         'qt6-base>=6.12' 'qt6-declarative>=6.12' 'qt6-multimedia>=6.12')
+optdepends=('yt-dlp: YouTube wallpaper source'
+            'steamcmd: Steam Workshop downloads without the Steam client')
+options=('!strip' '!debug')
+
+package() {
+    cp -a "$startdir/payload/." "$pkgdir/"
+}

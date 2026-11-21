@@ -34,6 +34,9 @@ for archive in "$work/archives/"*.pkg.tar.zst; do
                 usr/bin usr/lib/qt6/qml/Ryoku usr/lib/udev/rules.d/90-ryoku-gpu.rules \
                 usr/share/ryoku/config \
                 usr/share/ryoku/brand usr/share/ryoku/i18n ;;
+        ryogami-*)
+            mkdir -p "$work/wallpapers/payload"
+            bsdtar -xf "$archive" -C "$work/wallpapers/payload" usr ;;
         *) mv -- "$archive" "$work/repo/" ;;
     esac
 done
@@ -75,6 +78,16 @@ install -Dm644 "$shell_src/ryoku/upstream/NOTICE" "$payload/usr/share/licenses/t
 install -m 644 "$root/system/desktop/autostart.lua" "$data/config/hypr/modules/autostart.lua"
 install -m 644 "$root/system/desktop/autostart.lua" "$skel/.config/hypr/modules/autostart.lua"
 install -m 644 "$root/system/desktop/hypridle.conf" "$skel/.config/hypr/"
+
+wallpapers="$work/wallpapers"
+for change in "$shell_src"/ryoku/wallpaper-patches/*.patch; do
+    patch --batch --forward --fuzz=0 \
+        -d "$wallpapers/payload/usr/lib/qt6/qml/Ryoku/Ryogami" -p1 < "$change"
+done
+sed -i 's/^Name=Ryogami Wallpapers$/Name=Tsukuyomi Wallpapers/' \
+    "$wallpapers/payload/usr/share/applications/ryogami.desktop"
+cp "$root/packages/pkgbuilds/ryogami/PKGBUILD" "$wallpapers/"
+(cd "$wallpapers" && PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
 
 cp "$root/packages/pkgbuilds/tsukuyomi-ryoku-desktop/PKGBUILD" "$work/build/"
 (cd "$work/build" && PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
