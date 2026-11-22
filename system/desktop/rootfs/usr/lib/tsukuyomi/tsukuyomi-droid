@@ -1,0 +1,728 @@
+#!/usr/bin/env python3
+"""Tsukuyomi DroidBridge — Waydroid container manager, APK/XAPK installer, and launcher."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterator, Optional
+
+from compat_common import (
+    atomic_write_json,
+    atomic_write_text,
+    detect_hypr_monitor,
+    format_desktop_exec,
+    read_json,
+    refresh_desktop_caches,
+    run_cmd,
+    safe_extract_zip,
+    sanitize_desktop_value,
+    validate_android_pkg,
+    xdg_data_home,
+    xdg_runtime_dir,
+)
+from droid_apk import inspect_android_package
+
+SYSTEM_HIDE_PKGS = {
+    "com.android.calculator2",
+    "com.android.camera2",
+    "com.android.contacts",
+    "com.android.deskclock",
+    "com.android.dialer",
+    "com.android.documentsui",
+    "com.android.gallery3d",
+    "com.android.inputmethod.latin",
+    "com.android.messaging",
+    "com.android.settings",
+    "com.android.vending",
+    "org.lineageos.etar",
+    "org.lineageos.eleven",
+    "org.lineageos.jelly",
+    "org.lineageos.recorder",
+}
+
+VIEWPORT_PRESETS: dict[str, tuple[int, int, int]] = {
+    "compact": (390, 844, 280),
+    "phone": (450, 900, 300),
+    "tablet": (1024, 768, 220),
+    "landscape": (1280, 720, 220),
+    "fullhd": (1920, 1080, 260),
+}
+
+
+def droid_root() -> Path:
+    return xdg_data_home() / "tsukuyomi" / "android"
+
+
+def apps_db_path() -> Path:
+    return droid_root() / "apps.json"
+
+
+def config_path() -> Path:
+    return droid_root() / "config.json"
+
+
+def applications_dir() -> Path:
+    return xdg_data_home() / "applications"
+
+
+def icons_hicolor_dir() -> Path:
+    return xdg_data_home() / "icons" / "hicolor" / "256x256" / "apps"
+
+
+def waydroid_icons_dir() -> Path:
+    return xdg_data_home() / "waydroid" / "data" / "icons"
+
+
+def compat_apks_dir() -> Path:
+    return Path("/usr/share/tsukuyomi/compat/apks")
+
+
+def default_config() -> dict[str, object]:
+    return {
+        "showSystemApps": False,
+        "defaultMode": "phone",
+        "gameResolution": "1280x720",
+        "sharedDownloads": False,
+        "autoSeedStores": True,
+    }
+
+
+def load_config() -> dict[str, object]:
+    cfg = default_config()
+    raw = read_json(config_path(), {})
+    if isinstance(raw, dict):
+        cfg.update({k: v for k, v in raw.items() if k in cfg})
+    return cfg
+
+
+def save_config(cfg: dict[str, object]) -> None:
+    atomic_write_json(config_path(), cfg)
+
+
+def load_apps_db() -> dict[str, dict[str, object]]:
+    raw = read_json(apps_db_path(), {})
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_apps_db(db: dict[str, dict[str, object]]) -> None:
+    atomic_write_json(apps_db_path(), db)
+
+
+@contextmanager
+def droid_lock() -> Iterator[None]:
+    lock_file = xdg_runtime_dir() / "tsukuyomi-droid.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def detect_gpu_info() -> dict[str, object]:
+    """Detect optimal GPU backend: prefer AMD/Intel Mesa on hybrid, else SwiftShader."""
+    sw_marker = False
+    rt = os.environ.get("XDG_RUNTIME_DIR", "")
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    if rt and sig and (Path(rt) / "hypr" / sig / "tsukuyomi-software-renderer").is_file():
+        sw_marker = True
+
+    vendors: list[str] = []
+    for dev in sorted(Path("/sys/class/drm").glob("renderD*/device/vendor")):
+        try:
+            vendors.append(dev.read_text(encoding="utf-8").strip().lower())
+        except OSError:
+            pass
+
+    has_mesa = any(v in ("0x1002", "0x8086") for v in vendors)
+    has_nvidia = "0x10de" in vendors
+    mode = "mesa" if (has_mesa and not sw_marker) else "swiftshader"
+    return {
+        "mode": mode,
+        "vendors": vendors,
+        "hybrid": has_mesa and has_nvidia,
+        "softwareRenderer": sw_marker,
+    }
+
+
+def detect_arm_translation() -> dict[str, object]:
+    overlay = Path("/var/lib/waydroid/overlay")
+    libndk = any(
+        (overlay / p).exists()
+        for p in (
+            "system/lib64/libndk_translation.so",
+            "system/lib/libndk_translation.so",
+        )
+    )
+    libhoudini = any(
+        (overlay / p).exists()
+        for p in (
+            "system/lib64/libhoudini.so",
+            "system/lib/libhoudini.so",
+        )
+    )
+    return {
+        "installed": libndk or libhoudini,
+        "libndk": libndk,
+        "libhoudini": libhoudini,
+    }
+
+
+def _waydroid_initialized() -> bool:
+    return Path("/var/lib/waydroid/waydroid.cfg").is_file()
+
+
+def _offline_images_present() -> bool:
+    for d in (Path("/etc/waydroid-extra/images"), Path("/usr/share/waydroid-extra/images")):
+        if (d / "system.img").is_file() and (d / "vendor.img").is_file():
+            return True
+    return False
+
+
+def _container_active() -> bool:
+    return run_cmd(["systemctl", "is-active", "--quiet", "waydroid-container.service"], timeout=5).returncode == 0
+
+
+def _session_running() -> bool:
+    if not shutil.which("waydroid"):
+        return False
+    res = run_cmd(["waydroid", "status"], timeout=5)
+    return res.returncode == 0 and bool(re.search(r"Session:\s+RUNNING", res.stdout))
+
+
+def check_status() -> dict[str, object]:
+    gpu = detect_gpu_info()
+    arm = detect_arm_translation()
+    multi_win = True
+    if _container_active():
+        res = run_cmd(["waydroid", "prop", "get", "persist.waydroid.multi_windows"], timeout=4)
+        if res.returncode == 0 and "false" in res.stdout.lower():
+            multi_win = False
+    return {
+        "waydroidAvailable": bool(shutil.which("waydroid")),
+        "gamescopeAvailable": bool(shutil.which("gamescope")),
+        "initialized": _waydroid_initialized(),
+        "offlineImages": _offline_images_present(),
+        "containerActive": _container_active(),
+        "sessionRunning": _session_running(),
+        "multiWindows": multi_win,
+        "gpu": gpu,
+        "armTranslation": arm,
+        "config": load_config(),
+    }
+
+
+def _notify(summary: str, body: str) -> None:
+    if shutil.which("notify-send"):
+        run_cmd(["notify-send", "-a", "Tsukuyomi DroidBridge", summary, body], timeout=3)
+
+
+def _ensure_container_and_session(*, multi_windows: bool, width: int = 0, height: int = 0, fake_touch_pkg: str = "") -> bool:
+    if not _waydroid_initialized():
+        if not _offline_images_present():
+            return False
+        gpu_mode = str(detect_gpu_info()["mode"])
+        init_res = run_cmd(
+            ["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init", "--gpu", gpu_mode, "--offline"],
+            timeout=120,
+        )
+        if init_res.returncode != 0:
+            return False
+
+    if not _container_active():
+        res = run_cmd(["systemctl", "start", "waydroid-container.service"], timeout=15)
+        if res.returncode != 0:
+            return False
+
+    desired_mw = "true" if multi_windows else "false"
+    cur_mw_res = run_cmd(["waydroid", "prop", "get", "persist.waydroid.multi_windows"], timeout=4)
+    cur_mw = "false" if (cur_mw_res.returncode == 0 and "false" in cur_mw_res.stdout.lower()) else "true"
+
+    need_restart = False
+    if _session_running() and cur_mw != desired_mw:
+        need_restart = True
+
+    run_cmd(["waydroid", "prop", "set", "persist.waydroid.multi_windows", desired_mw], timeout=5)
+    if width > 0 and height > 0:
+        run_cmd(["waydroid", "prop", "set", "persist.waydroid.width", str(width)], timeout=5)
+        run_cmd(["waydroid", "prop", "set", "persist.waydroid.height", str(height)], timeout=5)
+    else:
+        run_cmd(["waydroid", "prop", "set", "persist.waydroid.width", ""], timeout=5)
+        run_cmd(["waydroid", "prop", "set", "persist.waydroid.height", ""], timeout=5)
+
+    if fake_touch_pkg:
+        validate_android_pkg(fake_touch_pkg)
+        existing_ft = run_cmd(["waydroid", "prop", "get", "persist.waydroid.fake_touch"], timeout=4).stdout.strip()
+        if fake_touch_pkg not in existing_ft:
+            new_ft = f"{existing_ft},{fake_touch_pkg}.*".strip(",") if existing_ft and "not set" not in existing_ft.lower() else f"{fake_touch_pkg}.*"
+            run_cmd(["waydroid", "prop", "set", "persist.waydroid.fake_touch", new_ft], timeout=5)
+
+    if need_restart:
+        _notify("Switching Android Mode", "Restarting container for requested display layout...")
+        run_cmd(["waydroid", "session", "stop"], timeout=15)
+        time.sleep(1)
+
+    if not _session_running():
+        _notify("Starting Android Subsystem", "Preparing Waydroid session...")
+        subprocess.Popen(["waydroid", "session", "start"], shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 25.0
+        while time.time() < deadline:
+            if _session_running():
+                boot = run_cmd(["waydroid", "prop", "get", "sys.boot_completed"], timeout=3)
+                if boot.returncode == 0 and "1" in boot.stdout:
+                    break
+            time.sleep(0.75)
+
+    return _session_running()
+
+
+def _seed_default_stores_if_needed() -> None:
+    cfg = load_config()
+    if not cfg.get("autoSeedStores", True):
+        return
+    marker = droid_root() / ".stores-seeded"
+    if marker.exists():
+        return
+    apks_src = compat_apks_dir()
+    if not apks_src.is_dir():
+        return
+    seeded = False
+    for apk_name in ("F-Droid.apk", "AuroraStore.apk"):
+        apk = apks_src / apk_name
+        if apk.is_file():
+            res = run_cmd(["waydroid", "app", "install", str(apk)], timeout=90)
+            if res.returncode == 0:
+                seeded = True
+    if seeded:
+        atomic_write_text(marker, "1\n")
+
+
+def _parse_desktop_kv(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    try:
+        in_main = False
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            s = line.strip()
+            if s.startswith("[") and s.endswith("]"):
+                in_main = s == "[Desktop Entry]"
+                continue
+            if in_main and "=" in s and not s.startswith("#"):
+                k, v = s.split("=", 1)
+                data[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return data
+
+
+def sync_desktop() -> dict[str, object]:
+    """Normalize Waydroid .desktop files and icons for Tsukuyomi Launcher & Dock."""
+    cfg = load_config()
+    show_sys = bool(cfg.get("showSystemApps", False))
+    db = load_apps_db()
+    apps_path = applications_dir()
+    apps_path.mkdir(parents=True, exist_ok=True)
+    synced: list[str] = []
+
+    for desktop in sorted(apps_path.glob("waydroid.*.desktop")):
+        pkg = desktop.stem.removeprefix("waydroid.")
+        try:
+            validate_android_pkg(pkg)
+        except ValueError:
+            continue
+
+        kv = _parse_desktop_kv(desktop)
+        name = sanitize_desktop_value(kv.get("Name") or pkg.split(".")[-1], pkg)
+        hidden = (pkg in SYSTEM_HIDE_PKGS) and (not show_sys)
+
+        # Resolve and normalize icon into hicolor FIRST (before rewriting .desktop)
+        icon_name = "application-vnd.android.package-archive"
+        icon_candidates = [
+            waydroid_icons_dir() / f"{pkg}.png",
+            Path(kv.get("Icon", "")) if kv.get("Icon", "").startswith("/") else Path("/nonexistent"),
+            icons_hicolor_dir() / f"waydroid.{pkg}.png",
+        ]
+        for cand in icon_candidates:
+            if cand.is_file() and cand.stat().st_size > 0:
+                dst = icons_hicolor_dir() / f"waydroid.{pkg}.png"
+                if cand != dst:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = dst.with_suffix(".png.tmp")
+                    shutil.copyfile(cand, tmp)
+                    os.replace(tmp, dst)
+                icon_name = f"waydroid.{pkg}"
+                break
+
+        exec_cmd = format_desktop_exec(["/usr/lib/tsukuyomi/droid-launch", pkg])
+        act_phone = format_desktop_exec(["/usr/lib/tsukuyomi/droid-launch", "--mode", "phone", pkg])
+        act_game = format_desktop_exec(["/usr/lib/tsukuyomi/droid-launch", "--mode", "game-gamescope", pkg])
+        act_stop = format_desktop_exec(["/usr/lib/tsukuyomi/tsukuyomi-droid", "force-stop", pkg])
+        act_uninst = format_desktop_exec(["/usr/lib/tsukuyomi/tsukuyomi-droid", "uninstall", pkg])
+
+        content = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            f"Name={name}\n"
+            "GenericName=Android App\n"
+            f"Comment=Run {name} on Tsukuyomi DroidBridge\n"
+            f"Exec={exec_cmd}\n"
+            f"Icon={icon_name}\n"
+            "Terminal=false\n"
+            f"NoDisplay={'true' if hidden else 'false'}\n"
+            f"StartupWMClass=waydroid.{pkg}\n"
+            "Categories=Utility;X-Tsukuyomi-Android;\n"
+            f"Keywords=android;apk;waydroid;{pkg};\n"
+            "X-Tsukuyomi-Runtime=android\n"
+            f"X-Tsukuyomi-Package={pkg}\n"
+            "Actions=LaunchPhone;LaunchGame;ForceStop;Uninstall;\n\n"
+            "[Desktop Action LaunchPhone]\n"
+            "Name=Open in Phone Mode (Multi-Window)\n"
+            f"Exec={act_phone}\n\n"
+            "[Desktop Action LaunchGame]\n"
+            "Name=Open in Game Mode (16:9 Landscape)\n"
+            f"Exec={act_game}\n\n"
+            "[Desktop Action ForceStop]\n"
+            "Name=Force Stop Android App\n"
+            f"Exec={act_stop}\n\n"
+            "[Desktop Action Uninstall]\n"
+            "Name=Uninstall Android App\n"
+            f"Exec={act_uninst}\n"
+        )
+        atomic_write_text(desktop, content)
+
+        if pkg not in db:
+            db[pkg] = {
+                "package": pkg,
+                "name": name,
+                "mode": "phone",
+                "fakeTouch": False,
+                "system": pkg in SYSTEM_HIDE_PKGS,
+            }
+        else:
+            db[pkg]["name"] = name
+        synced.append(pkg)
+
+    save_apps_db(db)
+    refresh_desktop_caches()
+    return {"ok": True, "synced": synced}
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    with droid_lock():
+        gpu_mode = str(detect_gpu_info()["mode"])
+        argv = ["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init", "--gpu", gpu_mode]
+        if args.offline or _offline_images_present():
+            argv.append("--offline")
+        if args.gapps:
+            argv.append("--gapps")
+        if args.force:
+            argv.append("--force")
+        res = run_cmd(argv, timeout=300)
+        if res.returncode != 0:
+            print(json.dumps({"ok": False, "error": res.stderr.strip() or res.stdout.strip()}))
+            return 1
+        _ensure_container_and_session(multi_windows=True)
+        _seed_default_stores_if_needed()
+        sync_desktop()
+        print(json.dumps({"ok": True, "status": check_status()}))
+        return 0
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    src = Path(args.file).expanduser().resolve()
+    if not src.is_file():
+        print(json.dumps({"ok": False, "error": f"File not found: {src}"}))
+        return 1
+
+    meta = inspect_android_package(src)
+    pkg = str(meta.get("package") or "")
+
+    with droid_lock():
+        if not _ensure_container_and_session(multi_windows=True):
+            print(json.dumps({"ok": False, "error": "Failed to start Waydroid container/session"}))
+            return 1
+        _seed_default_stores_if_needed()
+
+        if src.suffix.lower() in (".xapk", ".apkm"):
+            with tempfile.TemporaryDirectory(prefix="tsukuyomi-xapk-inst-") as tmp:
+                tmp_dir = Path(tmp)
+                extracted = safe_extract_zip(src, tmp_dir, allowed_exts={".apk", ".json"})
+                apks = sorted(str(p) for p in extracted if p.suffix.lower() == ".apk")
+                if not apks:
+                    print(json.dumps({"ok": False, "error": "No APK payloads found in bundle"}))
+                    return 1
+                res = run_cmd(["adb", "install-multiple", "-r", *apks], timeout=180)
+                if res.returncode != 0:
+                    # Fallback if adb wasn't connected yet
+                    run_cmd(["adb", "connect", "192.168.240.112:5555"], timeout=10)
+                    res = run_cmd(["adb", "install-multiple", "-r", *apks], timeout=180)
+        else:
+            res = run_cmd(["waydroid", "app", "install", str(src)], timeout=180)
+
+        if res.returncode != 0:
+            print(json.dumps({"ok": False, "error": res.stderr.strip() or res.stdout.strip()}))
+            return 1
+
+        if pkg:
+            db = load_apps_db()
+            db[pkg] = {
+                "package": pkg,
+                "name": str(meta.get("name") or pkg),
+                "mode": args.mode,
+                "fakeTouch": args.mode in ("landscape", "game-gamescope"),
+                "system": False,
+            }
+            save_apps_db(db)
+
+        time.sleep(1.5)
+        sync_res = sync_desktop()
+        print(json.dumps({"ok": True, "package": pkg, "name": meta.get("name"), "sync": sync_res}))
+        return 0
+
+
+def cmd_launch(args: argparse.Namespace) -> int:
+    pkg = validate_android_pkg(args.package)
+    db = load_apps_db()
+    cfg = load_config()
+    rec = db.get(pkg, {})
+    mode = args.mode or str(rec.get("mode") or cfg.get("defaultMode") or "phone")
+
+    with droid_lock():
+        _seed_default_stores_if_needed()
+        if mode == "game-gamescope":
+            res_str = str(cfg.get("gameResolution") or "1280x720")
+            try:
+                w_str, h_str = res_str.lower().split("x", 1)
+                w, h = int(w_str), int(h_str)
+            except ValueError:
+                w, h = 1280, 720
+            if not _ensure_container_and_session(multi_windows=False, width=w, height=h, fake_touch_pkg=pkg):
+                return 1
+            if shutil.which("gamescope"):
+                subprocess.Popen(
+                    [
+                        "gamescope", "--expose-wayland",
+                        "-w", str(w), "-h", str(h),
+                        "-W", str(w), "-H", str(h),
+                        "-S", "fit", "--",
+                        "/usr/lib/tsukuyomi/droid-gamescope-entry", pkg,
+                    ],
+                    shell=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                run_cmd(["waydroid", "shell", "wm", "user-rotation", "lock", "1"], timeout=5)
+                run_cmd(["waydroid", "app", "launch", pkg], timeout=15)
+                subprocess.Popen(["waydroid", "show-full-ui"], shell=False)
+            return 0
+
+        # Daily Phone / Multi-Window or Landscape Multi-Window
+        w, h = (1280, 720) if mode == "landscape" else (0, 0)
+        ft_pkg = pkg if (mode == "landscape" or rec.get("fakeTouch")) else ""
+        if not _ensure_container_and_session(multi_windows=True, width=w, height=h, fake_touch_pkg=ft_pkg):
+            return 1
+        res = run_cmd(["waydroid", "app", "launch", pkg], timeout=20)
+        return res.returncode
+
+
+def cmd_resize(args: argparse.Namespace) -> int:
+    preset = args.preset
+    if preset == "reset":
+        run_cmd(["waydroid", "shell", "wm", "size", "reset"], timeout=5)
+        run_cmd(["waydroid", "shell", "wm", "density", "reset"], timeout=5)
+        print(json.dumps({"ok": True, "preset": "reset"}))
+        return 0
+
+    w, h, dpi = VIEWPORT_PRESETS[preset]
+    mon = detect_hypr_monitor()
+    max_w = int(int(mon["width"]) / float(mon["scale"]) * 0.90)
+    max_h = int(int(mon["height"]) / float(mon["scale"]) * 0.86)
+    win_w = min(w, max_w)
+    win_h = min(h, max_h)
+
+    run_cmd(["waydroid", "shell", "wm", "size", f"{w}x{h}"], timeout=5)
+    run_cmd(["waydroid", "shell", "wm", "density", str(dpi)], timeout=5)
+
+    if shutil.which("hyprctl"):
+        clients = run_cmd(["hyprctl", "clients", "-j"], timeout=3)
+        if clients.returncode == 0:
+            try:
+                for cl in json.loads(clients.stdout):
+                    cls = str(cl.get("class") or "")
+                    if cls.startswith("waydroid.") or cls == "Waydroid":
+                        addr = str(cl.get("address") or "")
+                        if addr:
+                            run_cmd(["hyprctl", "dispatch", "resizewindowpixel", f"exact {win_w} {win_h},address:{addr}"], timeout=3)
+                            run_cmd(["hyprctl", "dispatch", "centerwindow", f"address:{addr}"], timeout=3)
+            except (ValueError, json.JSONDecodeError):
+                pass
+    print(json.dumps({"ok": True, "preset": preset, "width": win_w, "height": win_h}))
+    return 0
+
+
+def cmd_sleep(_args: argparse.Namespace) -> int:
+    with droid_lock():
+        run_cmd(["waydroid", "session", "stop"], timeout=15)
+        res = run_cmd(["systemctl", "stop", "waydroid-container.service"], timeout=15)
+        print(json.dumps({"ok": res.returncode == 0}))
+        return 0 if res.returncode == 0 else 1
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    pkg = validate_android_pkg(args.package)
+    with droid_lock():
+        if _ensure_container_and_session(multi_windows=True):
+            run_cmd(["waydroid", "app", "remove", pkg], timeout=60)
+        (applications_dir() / f"waydroid.{pkg}.desktop").unlink(missing_ok=True)
+        (icons_hicolor_dir() / f"waydroid.{pkg}.png").unlink(missing_ok=True)
+        db = load_apps_db()
+        db.pop(pkg, None)
+        save_apps_db(db)
+        refresh_desktop_caches()
+        print(json.dumps({"ok": True, "removed": pkg}))
+        return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="tsukuyomi-droid")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status")
+    sub.add_parser("sync-desktop")
+    sub.add_parser("list")
+    sub.add_parser("sleep")
+    sub.add_parser("open-ui")
+
+    p_init = sub.add_parser("init")
+    p_init.add_argument("--offline", action="store_true")
+    p_init.add_argument("--gapps", action="store_true")
+    p_init.add_argument("--force", action="store_true")
+
+    p_ins = sub.add_parser("inspect")
+    p_ins.add_argument("file")
+
+    p_inst = sub.add_parser("install")
+    p_inst.add_argument("file")
+    p_inst.add_argument("--mode", choices=("phone", "landscape", "game-gamescope"), default="phone")
+
+    p_launch = sub.add_parser("launch")
+    p_launch.add_argument("package")
+    p_launch.add_argument("--mode", choices=("phone", "landscape", "game-gamescope", ""), default="")
+
+    p_res = sub.add_parser("resize")
+    p_res.add_argument("preset", choices=("compact", "phone", "tablet", "landscape", "reset"))
+
+    p_prof = sub.add_parser("set-profile")
+    p_prof.add_argument("package")
+    p_prof.add_argument("--mode", choices=("phone", "landscape", "game-gamescope"), required=True)
+
+    p_stop = sub.add_parser("force-stop")
+    p_stop.add_argument("package")
+
+    p_un = sub.add_parser("uninstall")
+    p_un.add_argument("package")
+
+    p_add = sub.add_parser("setup-addon")
+    p_add.add_argument("addon", choices=("libndk", "libhoudini", "gapps"))
+
+    p_cfg = sub.add_parser("set-config")
+    p_cfg.add_argument("--show-system-apps", choices=("true", "false"), default="")
+    p_cfg.add_argument("--game-resolution", default="")
+    p_cfg.add_argument("--shared-downloads", choices=("true", "false"), default="")
+
+    args = parser.parse_args(argv)
+    if args.cmd == "status":
+        print(json.dumps(check_status()))
+        return 0
+    if args.cmd == "inspect":
+        src = Path(args.file).expanduser().resolve()
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+            icon_tmp = Path(tf.name)
+        info = inspect_android_package(src, icon_tmp)
+        if not info.get("icon_extracted"):
+            icon_tmp.unlink(missing_ok=True)
+            info["icon_preview"] = ""
+        else:
+            info["icon_preview"] = str(icon_tmp)
+        info["arm_translation_installed"] = bool(detect_arm_translation()["installed"])
+        print(json.dumps(info))
+        return 0
+    if args.cmd == "init":
+        return cmd_init(args)
+    if args.cmd == "install":
+        return cmd_install(args)
+    if args.cmd == "launch":
+        return cmd_launch(args)
+    if args.cmd == "resize":
+        return cmd_resize(args)
+    if args.cmd == "sleep":
+        return cmd_sleep(args)
+    if args.cmd == "open-ui":
+        with droid_lock():
+            if _ensure_container_and_session(multi_windows=False):
+                subprocess.Popen(["waydroid", "show-full-ui"], shell=False)
+                return 0
+            return 1
+    if args.cmd == "sync-desktop":
+        print(json.dumps(sync_desktop()))
+        return 0
+    if args.cmd == "list":
+        print(json.dumps({"apps": list(load_apps_db().values()), "config": load_config()}))
+        return 0
+    if args.cmd == "set-profile":
+        pkg = validate_android_pkg(args.package)
+        db = load_apps_db()
+        rec = db.get(pkg, {"package": pkg, "name": pkg, "system": pkg in SYSTEM_HIDE_PKGS})
+        rec["mode"] = args.mode
+        rec["fakeTouch"] = args.mode in ("landscape", "game-gamescope")
+        db[pkg] = rec
+        save_apps_db(db)
+        print(json.dumps({"ok": True, "app": rec}))
+        return 0
+    if args.cmd == "force-stop":
+        pkg = validate_android_pkg(args.package)
+        res = run_cmd(["waydroid", "shell", "am", "force-stop", pkg], timeout=10)
+        return res.returncode
+    if args.cmd == "uninstall":
+        return cmd_uninstall(args)
+    if args.cmd == "setup-addon":
+        res = run_cmd(["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "addon", args.addon], timeout=600)
+        print(json.dumps({"ok": res.returncode == 0, "stdout": res.stdout, "stderr": res.stderr}))
+        return res.returncode
+    if args.cmd == "set-config":
+        cfg = load_config()
+        if args.show_system_apps:
+            cfg["showSystemApps"] = args.show_system_apps == "true"
+        if args.game_resolution and "x" in args.game_resolution:
+            cfg["gameResolution"] = args.game_resolution
+        if args.shared_downloads:
+            enable = args.shared_downloads == "true"
+            user = os.environ.get("USER") or Path.home().name
+            res = run_cmd(
+                ["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "bind-shared", "--user", user, "--uid", str(os.getuid()), "--enable", args.shared_downloads],
+                timeout=30,
+            )
+            if res.returncode == 0:
+                cfg["sharedDownloads"] = enable
+        save_config(cfg)
+        sync_desktop()
+        print(json.dumps({"ok": True, "config": cfg}))
+        return 0
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Privileged helper for Tsukuyomi DroidBridge (invoked via pkexec)."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Optional
+
+USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+WAYDROID_CFG = Path("/var/lib/waydroid/waydroid.cfg")
+
+
+def run_cmd(argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(argv, shell=False, text=True, capture_output=True, check=check)
+
+
+def _find_offline_images() -> Optional[Path]:
+    for d in (Path("/etc/waydroid-extra/images"), Path("/usr/share/waydroid-extra/images")):
+        if (d / "system.img").is_file() and (d / "vendor.img").is_file():
+            return d
+    return None
+
+
+def _update_cfg_properties(updates: dict[str, str]) -> None:
+    if not WAYDROID_CFG.is_file():
+        return
+    lines = WAYDROID_CFG.read_text(encoding="utf-8").splitlines()
+    out: list[str] = []
+    in_props = False
+    applied: set[str] = set()
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_props:
+                for k, v in updates.items():
+                    if k not in applied:
+                        out.append(f"{k} = {v}")
+                        applied.add(k)
+            in_props = stripped.lower() == "[properties]"
+            out.append(line)
+            continue
+
+        if in_props and "=" in line and not stripped.startswith("#"):
+            key = line.split("=", 1)[0].strip()
+            if key in updates:
+                out.append(f"{key} = {updates[key]}")
+                applied.add(key)
+                continue
+        out.append(line)
+
+    if in_props:
+        for k, v in updates.items():
+            if k not in applied:
+                out.append(f"{k} = {v}")
+                applied.add(k)
+    elif len(applied) < len(updates):
+        out.append("")
+        out.append("[properties]")
+        for k, v in updates.items():
+            if k not in applied:
+                out.append(f"{k} = {v}")
+
+    WAYDROID_CFG.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    img_dir = _find_offline_images()
+    if args.offline and not img_dir:
+        print("Offline Waydroid images not found in /usr/share/waydroid-extra/images or /etc/waydroid-extra/images", file=sys.stderr)
+        return 1
+
+    if not WAYDROID_CFG.is_file() or args.force:
+        if img_dir:
+            res = run_cmd(["waydroid", "init", "-f"])
+        elif args.gapps:
+            res = run_cmd(["waydroid", "init", "-s", "GAPPS", "-f"])
+        else:
+            res = run_cmd(["waydroid", "init", "-f"])
+        if res.returncode != 0:
+            sys.stderr.write(res.stderr or res.stdout)
+            return res.returncode
+
+    props = {
+        "persist.waydroid.multi_windows": "true",
+        "persist.waydroid.cursor_on_subsurface": "true",
+    }
+    if args.gpu == "swiftshader":
+        props["ro.hardware.gralloc"] = "default"
+        props["ro.hardware.egl"] = "swiftshader"
+    else:
+        props["ro.hardware.gralloc"] = "gbm"
+        props["ro.hardware.egl"] = "mesa"
+
+    _update_cfg_properties(props)
+    run_cmd(["waydroid", "upgrade", "--offline"])
+    run_cmd(["systemctl", "enable", "waydroid-container.service"])
+    run_cmd(["systemctl", "restart", "waydroid-container.service"])
+    return 0
+
+
+def cmd_addon(args: argparse.Namespace) -> int:
+    addon = args.addon
+    if addon == "gapps":
+        run_cmd(["systemctl", "stop", "waydroid-container.service"])
+        res = run_cmd(["waydroid", "init", "-s", "GAPPS", "-f"])
+        run_cmd(["systemctl", "start", "waydroid-container.service"])
+        sys.stdout.write(res.stdout)
+        sys.stderr.write(res.stderr)
+        return res.returncode
+
+    if addon in ("libndk", "libhoudini"):
+        run_cmd(["systemctl", "stop", "waydroid-container.service"])
+        with tempfile.TemporaryDirectory(prefix="tsukuyomi-wd-addon-") as tmp:
+            repo_dir = Path(tmp) / "waydroid_script"
+            clone = run_cmd(["git", "clone", "--depth", "1", "https://github.com/casualsnek/waydroid_script.git", str(repo_dir)])
+            if clone.returncode != 0:
+                sys.stderr.write(clone.stderr or clone.stdout)
+                return 1
+            venv_dir = Path(tmp) / "venv"
+            run_cmd([sys.executable, "-m", "venv", str(venv_dir)], check=True)
+            pip_bin = str(venv_dir / "bin" / "pip")
+            py_bin = str(venv_dir / "bin" / "python")
+            req = repo_dir / "requirements.txt"
+            if req.is_file():
+                pip_res = run_cmd([pip_bin, "install", "--quiet", "-r", str(req)])
+                if pip_res.returncode != 0:
+                    sys.stderr.write(pip_res.stderr or pip_res.stdout)
+                    return 1
+            inst = run_cmd([py_bin, str(repo_dir / "main.py"), "install", addon])
+            sys.stdout.write(inst.stdout)
+            sys.stderr.write(inst.stderr)
+            run_cmd(["systemctl", "start", "waydroid-container.service"])
+            return inst.returncode
+
+    return 1
+
+
+def cmd_bind_shared(args: argparse.Namespace) -> int:
+    user = args.user
+    if not USER_RE.match(user) or user == "root":
+        print(f"Invalid user: {user!r}", file=sys.stderr)
+        return 1
+    home = Path(f"/home/{user}")
+    host_dl = home / "Downloads"
+    if not host_dl.is_dir():
+        return 1
+    droid_dl = home / ".local" / "share" / "waydroid" / "data" / "media" / "0" / "Download"
+    droid_dl.mkdir(parents=True, exist_ok=True)
+    # Apply tight POSIX ACL on Downloads so both host user and Android container UIDs can share files safely.
+    if shutil.which("setfacl"):
+        run_cmd(["setfacl", "-R", "-m", f"u:{args.uid}:rwx", str(host_dl)])
+        run_cmd(["setfacl", "-R", "-d", "-m", f"u:{args.uid}:rwx", str(host_dl)])
+    if args.enable == "true":
+        mounted = run_cmd(["mountpoint", "-q", str(droid_dl)]).returncode == 0
+        if not mounted:
+            res = run_cmd(["mount", "--bind", str(host_dl), str(droid_dl)])
+            if res.returncode != 0:
+                sys.stderr.write(res.stderr)
+                return res.returncode
+    else:
+        if run_cmd(["mountpoint", "-q", str(droid_dl)]).returncode == 0:
+            run_cmd(["umount", str(droid_dl)])
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="droid-system-init")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_init = sub.add_parser("init")
+    p_init.add_argument("--gpu", choices=("mesa", "swiftshader"), default="mesa")
+    p_init.add_argument("--offline", action="store_true")
+    p_init.add_argument("--gapps", action="store_true")
+    p_init.add_argument("--force", action="store_true")
+
+    p_addon = sub.add_parser("addon")
+    p_addon.add_argument("addon", choices=("libndk", "libhoudini", "gapps"))
+
+    p_bind = sub.add_parser("bind-shared")
+    p_bind.add_argument("--user", required=True)
+    p_bind.add_argument("--uid", type=int, required=True)
+    p_bind.add_argument("--enable", choices=("true", "false"), required=True)
+
+    args = parser.parse_args(argv)
+    if args.cmd == "init":
+        return cmd_init(args)
+    if args.cmd == "addon":
+        return cmd_addon(args)
+    if args.cmd == "bind-shared":
+        return cmd_bind_shared(args)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

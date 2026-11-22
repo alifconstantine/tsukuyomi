@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+pkg=${1:?package name required}
+waydroid shell wm user-rotation lock 1 >/dev/null 2>&1 || true
+waydroid app launch "$pkg" >/dev/null 2>&1 || true
+exec waydroid show-full-ui

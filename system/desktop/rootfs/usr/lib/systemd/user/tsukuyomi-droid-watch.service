@@ -1,0 +1,13 @@
+[Unit]
+Description=Tsukuyomi DroidBridge desktop entry watcher
+PartOf=ryoku-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+ExecStart=/usr/lib/tsukuyomi/tsukuyomi-droid-watch
+Restart=on-failure
+RestartSec=3
+Slice=session.slice
+
+[Install]
+WantedBy=ryoku-session.target
