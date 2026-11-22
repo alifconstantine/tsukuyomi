@@ -27,11 +27,13 @@ repo/x86_64/*.db*
 repo/x86_64/*.files*
 repo/offline/
 repo/ryoku/
+repo/compat-apks/
 repo/offline-cache/
 repo/uv-wheels/
 repo/end4-python/
 repo/.end4-python.*/
 /archiso/airootfs/etc/skel/Pictures/Wallpapers/Ryoku/
+archiso/airootfs/usr/share/tsukuyomi/compat/
 archiso/airootfs/usr/share/tsukuyomi/repo/
 archiso/airootfs/usr/share/tsukuyomi/offline/
 archiso/airootfs/usr/share/tsukuyomi/shell/wheels/
