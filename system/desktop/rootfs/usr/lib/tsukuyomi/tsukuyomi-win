@@ -169,6 +169,7 @@ def _apply_prefix_hardening_and_theme(
     sandbox: bool,
     wayland: bool,
     dxvk: bool,
+    hide_standalone_tray: bool = False,
     force: bool = False,
 ) -> None:
     mon = detect_hypr_monitor()
@@ -185,7 +186,14 @@ def _apply_prefix_hardening_and_theme(
     }
     meta_file = prefix / ".tsukuyomi-prefix.json"
     prev_meta = read_json(meta_file, {})
-    if not force and isinstance(prev_meta, dict) and prev_meta.get("appliedState") == state_sig:
+    prev_state = prev_meta.get("appliedState", {}) if isinstance(prev_meta, dict) else {}
+    # This is a Wine prefix setting, including when several apps share a prefix.
+    hide_standalone_tray = hide_standalone_tray or (
+        isinstance(prev_state, dict) and prev_state.get("hideStandaloneTray") is True
+    )
+    if hide_standalone_tray:
+        state_sig["hideStandaloneTray"] = True
+    if not force and prev_state == state_sig:
         return
 
     user = os.environ.get("USER") or Path.home().name
@@ -273,6 +281,10 @@ def _apply_prefix_hardening_and_theme(
         "[HKEY_CURRENT_USER\\Control Panel\\Colors]\n"
         f"{colors}\n"
     )
+    if hide_standalone_tray:
+        # Without an XEmbed tray host, Wine Explorer creates its own strip.
+        # This disables only that fallback window, leaving host docking enabled.
+        reg_content += '[HKEY_CURRENT_USER\\Software\\Wine\\Explorer]\n"ShowSystray"=dword:00000000\n\n'
     with tempfile.NamedTemporaryFile("w", suffix=".reg", delete=False, encoding="utf-8") as tf:
         tf.write(reg_content)
         reg_file = Path(tf.name)
@@ -304,7 +316,9 @@ def _apply_prefix_hardening_and_theme(
     atomic_write_json(meta_file, meta)
 
 
-def _ensure_prefix(slug: str, *, sandbox: bool, wayland: bool, dxvk: bool) -> Path:
+def _ensure_prefix(
+    slug: str, *, sandbox: bool, wayland: bool, dxvk: bool, hide_standalone_tray: bool = False,
+) -> Path:
     validate_slug(slug)
     prefix = prefixes_dir() / slug
     is_new = not all((prefix / name).is_file() for name in ("system.reg", "user.reg"))
@@ -335,7 +349,10 @@ def _ensure_prefix(slug: str, *, sandbox: bool, wayland: bool, dxvk: bool) -> Pa
         )
         if not all((prefix / name).is_file() for name in ("system.reg", "user.reg")):
             raise ValueError("Could not prepare the Windows environment.")
-    _apply_prefix_hardening_and_theme(prefix, sandbox=sandbox, wayland=wayland, dxvk=dxvk, force=is_new)
+    _apply_prefix_hardening_and_theme(
+        prefix, sandbox=sandbox, wayland=wayland, dxvk=dxvk,
+        hide_standalone_tray=hide_standalone_tray, force=is_new,
+    )
     if is_new and sandbox:
         # A setup in Bubblewrap starts a separate server. Let the first
         # registry import flush before that server opens the same prefix.
@@ -762,7 +779,9 @@ def _install_in_prefix(
     sandbox: bool, wayland: bool, dxvk: bool, runner: str, antigravity_setup: bool,
 ) -> int:
     mode = args.mode
-    prefix = _ensure_prefix(slug, sandbox=sandbox, wayland=wayland, dxvk=dxvk)
+    prefix = _ensure_prefix(
+        slug, sandbox=sandbox, wayland=wayland, dxvk=dxvk, hide_standalone_tray=antigravity_setup,
+    )
     env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, runner=runner)
 
     if mode == "portable" and not args.pin_portable:
@@ -937,7 +956,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     sandbox = bool(rec.get("sandbox", True))
     runner = str(rec.get("runner") or "wine")
 
-    _ensure_prefix(slug, sandbox=sandbox, wayland=wayland, dxvk=dxvk)
+    _ensure_prefix(
+        slug, sandbox=sandbox, wayland=wayland, dxvk=dxvk,
+        hide_standalone_tray=exe.name.casefold() == "antigravity.exe",
+    )
     env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, runner=runner)
 
     extra_args = shlex.split(str(rec.get("args") or ""))

@@ -106,6 +106,26 @@ def _build_synthetic_axml(package: str, version_name: str, label: str) -> bytes:
 
 
 class CompatTests(unittest.TestCase):
+    def test_antigravity_prefix_migrates_standalone_tray_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "antigravity"
+            options = {"sandbox": False, "wayland": False, "dxvk": False}
+            imports = []
+
+            def capture_import(argv, **_kwargs):
+                imports.append(Path(argv[-1]).read_text())
+
+            with mock.patch.object(tsukuyomi_win, "detect_hypr_monitor", return_value={"scale": 1}), \
+                    mock.patch.object(tsukuyomi_win, "detect_theme_dark", return_value=True), \
+                    mock.patch.object(tsukuyomi_win.subprocess, "run", side_effect=capture_import):
+                tsukuyomi_win._apply_prefix_hardening_and_theme(prefix, **options)
+                tsukuyomi_win._apply_prefix_hardening_and_theme(prefix, hide_standalone_tray=True, **options)
+                tsukuyomi_win._apply_prefix_hardening_and_theme(prefix, **options)
+
+            self.assertEqual(len(imports), 2)
+            self.assertNotIn("ShowSystray", imports[0])
+            self.assertIn('"ShowSystray"=dword:00000000', imports[1])
+
     def test_validators_reject_injection(self) -> None:
         self.assertEqual(compat_common.validate_slug("notepad-plus-2"), "notepad-plus-2")
         with self.assertRaises(ValueError):
