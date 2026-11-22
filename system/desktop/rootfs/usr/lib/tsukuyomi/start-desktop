@@ -18,10 +18,20 @@ export TSUKUYOMI_SOFTWARE_RENDERER=0
 if [[ -n ${XDG_RUNTIME_DIR:-} && -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
     compositor_runtime="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE"
     renderer_log="$compositor_runtime/hyprland.log"
-    software_pattern='[[:space:]]Renderer: (llvmpipe|softpipe)([ (]|$)'
-    # Mixed or unidentified renderers keep the regular graphics profile.
-    if [[ -r $renderer_log ]] && grep -qiE "$software_pattern" "$renderer_log" &&
-        ! grep -iE '[[:space:]]Renderer: ' "$renderer_log" | grep -qivE "$software_pattern"; then
+    # Aquamarine colours each Renderer token and also logs CDRMRenderer diagnostics.
+    # Match only its actual device names after stripping ANSI colour escapes.
+    if [[ -r $renderer_log ]] && awk '
+        {
+            gsub(/\033\[[0-9;]*m/, "")
+            if (match($0, /(^|[[:space:]])Renderer: /)) {
+                seen++
+                device = tolower(substr($0, RSTART + RLENGTH))
+                if (device ~ /^(llvmpipe|softpipe|swrast|software rasterizer)([ (]|$)/)
+                    software++
+            }
+        }
+        END { exit !(seen && seen == software) }
+    ' "$renderer_log"; then
         if printf '1\n' > "$compositor_runtime/tsukuyomi-software-renderer"; then
             export TSUKUYOMI_SOFTWARE_RENDERER=1
             hyprctl reload config-only >/dev/null || true

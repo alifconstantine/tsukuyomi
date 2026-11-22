@@ -38,10 +38,12 @@ adopt_shipped_module binds \
 adopt_shipped_module decoration \
     64b074c76027554c905a1fd507d6fe886c5bb2c880404624f098c12640a9d606
 adopt_shipped_module perf_saver \
-    40307993e7d722d3f2f27fc5c84e219ea172b60454f6399fe0921e1625b46df8
+    40307993e7d722d3f2f27fc5c84e219ea172b60454f6399fe0921e1625b46df8 \
+    57c742f6ab8246ea2df84034ee154284d806890b83de4c37073c6a928b767ca0
 adopt_shipped_module window_rules \
     1d0443b2c32a540b7da535f63c3e91b6f32eb2d151641a2d97455f19d662c2c7 \
-    a8cb66ae0c5a583509dfe84b0d77dacd4d2afc94a68f773d90de81f2da1e11ed
+    a8cb66ae0c5a583509dfe84b0d77dacd4d2afc94a68f773d90de81f2da1e11ed \
+    d04ff344e30adb5dbc3ea9fbca926e2c49c6e765499f5029e693d43447ac529d
 
 seed_picker_defaults() {
     local config="${XDG_CONFIG_HOME:-$HOME/.config}/ryoku/ryogami.json"
