@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ALLOWED_PKGS=(winboat faugus-launcher proton-cachyos-native)
+
+is_allowed() {
+    local target=${1:-}
+    for p in "${ALLOWED_PKGS[@]}"; do
+        [[ $p == "$target" ]] && return 0
+    done
+    return 1
+}
+
+cmd=${1:-status}
+pkg=${2:-}
+
+case "$cmd" in
+    status)
+        python3 - <<'PY'
+import json, subprocess
+
+pkgs = ["winboat", "faugus-launcher", "proton-cachyos-native"]
+out = {}
+for p in pkgs:
+    res = subprocess.run(["pacman", "-Q", p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    out[p] = (res.returncode == 0)
+nm = subprocess.run(["nmcli", "-t", "-f", "STATE", "general"], capture_output=True, text=True)
+out["offline"] = nm.stdout.strip().lower() in ("disconnected", "asleep")
+print(json.dumps(out))
+PY
+        ;;
+    install)
+        if ! is_allowed "$pkg"; then
+            printf 'Unknown compatibility add-on: %s\n' "$pkg" >&2
+            exit 2
+        fi
+        printf 'Installing optional Tsukuyomi Store add-on: %s\n' "$pkg"
+        if [[ $pkg == winboat ]]; then
+            printf 'Tip: WinBoat uses Podman or Docker containers for its seamless Windows VM.\n'
+        fi
+        sudo pacman -Syu --needed "$pkg" || true
+        if [[ -t 0 ]]; then
+            echo
+            read -r -p "Press Enter to close..."
+        fi
+        ;;
+    remove)
+        if ! is_allowed "$pkg"; then
+            printf 'Unknown compatibility add-on: %s\n' "$pkg" >&2
+            exit 2
+        fi
+        printf 'Removing optional compatibility add-on: %s\n' "$pkg"
+        sudo pacman -Rns "$pkg" || true
+        if [[ -t 0 ]]; then
+            echo
+            read -r -p "Press Enter to close..."
+        fi
+        ;;
+    *)
+        printf 'Usage: compat-store-setup {status|install <pkg>|remove <pkg>}\n' >&2
+        exit 2
+        ;;
+esac
