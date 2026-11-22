@@ -1,0 +1,918 @@
+#!/usr/bin/env python3
+"""Tsukuyomi WinBridge — Isolated Windows prefix manager, installer, and runner."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Optional
+
+from compat_common import (
+    atomic_write_json,
+    atomic_write_text,
+    detect_hypr_monitor,
+    detect_theme_dark,
+    format_desktop_exec,
+    read_json,
+    refresh_desktop_caches,
+    run_cmd,
+    sanitize_desktop_value,
+    slugify,
+    validate_slug,
+    xdg_data_home,
+    xdg_runtime_dir,
+)
+from win_lnk import extract_exe_icon_png, inspect_pe
+
+SKIP_EXE_STEMS = (
+    "unins",
+    "uninstall",
+    "update",
+    "updater",
+    "crashreport",
+    "crashhandler",
+    "vc_redist",
+    "vcredist",
+    "dxsetup",
+    "dotnet",
+    "ndp",
+    "helper",
+)
+
+
+def win_root() -> Path:
+    return xdg_data_home() / "tsukuyomi" / "windows"
+
+
+def prefixes_dir() -> Path:
+    return win_root() / "prefixes"
+
+
+def apps_dir() -> Path:
+    return win_root() / "apps"
+
+
+def config_path() -> Path:
+    return win_root() / "config.json"
+
+
+def shared_dir() -> Path:
+    return Path.home() / "Public" / "Tsukuyomi-Windows"
+
+
+def icons_hicolor_dir() -> Path:
+    return xdg_data_home() / "icons" / "hicolor" / "256x256" / "apps"
+
+
+def applications_dir() -> Path:
+    return xdg_data_home() / "applications"
+
+
+def default_config() -> dict[str, object]:
+    return {
+        "defaultRunner": "wine",
+        "defaultWayland": False,
+        "defaultSandbox": True,
+        "defaultDxvk": True,
+        "defaultWindowsVersion": "win10",
+    }
+
+
+def load_config() -> dict[str, object]:
+    cfg = default_config()
+    raw = read_json(config_path(), {})
+    if isinstance(raw, dict):
+        cfg.update({k: v for k, v in raw.items() if k in cfg})
+    return cfg
+
+
+def save_config(cfg: dict[str, object]) -> None:
+    atomic_write_json(config_path(), cfg)
+
+
+def check_status() -> dict[str, object]:
+    wine_ver = ""
+    if shutil.which("wine"):
+        res = run_cmd(["wine", "--version"], timeout=5)
+        if res.returncode == 0:
+            wine_ver = res.stdout.strip()
+    proton_paths = [
+        p
+        for p in (
+            "/usr/share/steam/compatibilitytools.d/proton-cachyos",
+            "/usr/share/steam/compatibilitytools.d/proton-cachyos-slr",
+        )
+        if Path(p).is_dir()
+    ]
+    ntsync_available = Path("/dev/ntsync").exists() or Path("/sys/module/ntsync").exists()
+    return {
+        "wineAvailable": bool(shutil.which("wine")),
+        "wineVersion": wine_ver,
+        "umuAvailable": bool(shutil.which("umu-run")),
+        "protonPaths": proton_paths,
+        "protonAvailable": bool(proton_paths),
+        "dxvkAvailable": Path("/usr/share/dxvk").is_dir() or bool(shutil.which("setup_dxvk")),
+        "vkd3dAvailable": Path("/usr/share/vkd3d-proton").is_dir() or Path("/usr/lib/vkd3d").is_dir(),
+        "winetricksAvailable": bool(shutil.which("winetricks")),
+        "bwrapAvailable": bool(shutil.which("bwrap")),
+        "ntsyncAvailable": ntsync_available,
+        "config": load_config(),
+    }
+
+
+def _wine_env(prefix: Path, *, wayland: bool = False, dxvk: bool = True, runner: str = "wine") -> dict[str, str]:
+    env = os.environ.copy()
+    env["WINEPREFIX"] = str(prefix)
+    env["WINEARCH"] = "win64"
+    env["WINEDEBUG"] = env.get("WINEDEBUG", "-all")
+    env["WINE_NTSYNC"] = "1"
+    overrides = ["winemenubuilder.exe=d"]
+    if dxvk:
+        overrides.extend(["d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=n,b"])
+    env["WINEDLLOVERRIDES"] = ";".join(overrides)
+    if wayland:
+        env["DISPLAY"] = env.get("DISPLAY", ":0")
+    if runner == "umu":
+        env["GAMEID"] = env.get("GAMEID", "umu-default")
+        for p in (
+            "/usr/share/steam/compatibilitytools.d/proton-cachyos",
+            "/usr/share/steam/compatibilitytools.d/proton-cachyos-slr",
+        ):
+            if Path(p).is_dir():
+                env.setdefault("PROTONPATH", p)
+                break
+    return env
+
+
+def _apply_prefix_hardening_and_theme(prefix: Path, *, sandbox: bool, wayland: bool, dxvk: bool) -> None:
+    user = os.environ.get("USER") or Path.home().name
+    users_dir = prefix / "drive_c" / "users" / user
+    if sandbox and users_dir.is_dir():
+        for folder in ("Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"):
+            target = users_dir / folder
+            if target.is_symlink():
+                target.unlink()
+            target.mkdir(parents=True, exist_ok=True)
+        z_drive = prefix / "dosdevices" / "z:"
+        if z_drive.is_symlink() or z_drive.exists():
+            z_drive.unlink(missing_ok=True)
+        shared = shared_dir()
+        shared.mkdir(parents=True, exist_ok=True)
+        d_drive = prefix / "dosdevices" / "d:"
+        if d_drive.is_symlink():
+            d_drive.unlink()
+        if not d_drive.exists():
+            d_drive.symlink_to(shared)
+    elif not sandbox:
+        z_drive = prefix / "dosdevices" / "z:"
+        if not z_drive.exists():
+            (prefix / "dosdevices").mkdir(parents=True, exist_ok=True)
+            z_drive.symlink_to("/")
+
+    # Install DXVK/VKD3D DLLs into prefix if available
+    if dxvk:
+        for base_dir in (Path("/usr/share/dxvk"), Path("/usr/share/vkd3d-proton")):
+            if not base_dir.is_dir():
+                continue
+            for arch_src, win_dst in (("x64", "system32"), ("x32", "syswow64"), ("x86", "syswow64")):
+                src_dir = base_dir / arch_src
+                dst_dir = prefix / "drive_c" / "windows" / win_dst
+                if src_dir.is_dir() and dst_dir.is_dir():
+                    for dll in src_dir.glob("*.dll"):
+                        target = dst_dir / dll.name
+                        if not target.exists() or target.is_symlink():
+                            target.unlink(missing_ok=True)
+                            target.symlink_to(dll)
+
+    # Apply DPI, ClearType, Dark/Light theme, and Wayland/X11 driver registry
+    mon = detect_hypr_monitor()
+    scale = max(1.0, min(3.0, float(mon.get("scale", 1.0))))
+    dpi = int(round(96 * scale))
+    dark = detect_theme_dark()
+    graphics_drv = "wayland,x11" if wayland else "x11"
+
+    if dark:
+        colors = (
+            '"Window"="22 22 22"\n'
+            '"WindowText"="234 226 213"\n'
+            '"Background"="18 14 14"\n'
+            '"ButtonFace"="34 34 34"\n'
+            '"ButtonText"="234 226 213"\n'
+            '"Menu"="28 28 28"\n'
+            '"MenuText"="234 226 213"\n'
+            '"AppWorkSpace"="22 22 22"\n'
+        )
+        apps_light = "00000000"
+    else:
+        colors = (
+            '"Window"="244 245 247"\n'
+            '"WindowText"="32 33 36"\n'
+            '"Background"="236 238 242"\n'
+            '"ButtonFace"="232 234 238"\n'
+            '"ButtonText"="32 33 36"\n'
+            '"Menu"="244 245 247"\n'
+            '"MenuText"="32 33 36"\n'
+            '"AppWorkSpace"="244 245 247"\n'
+        )
+        apps_light = "00000001"
+
+    reg_content = (
+        "Windows Registry Editor Version 5.00\n\n"
+        "[HKEY_CURRENT_USER\\Software\\Wine\\Drivers]\n"
+        f'"Graphics"="{graphics_drv}"\n\n'
+        "[HKEY_CURRENT_USER\\Control Panel\\Desktop]\n"
+        f'"LogPixels"=dword:{dpi:08x}\n'
+        '"FontSmoothing"="2"\n'
+        '"FontSmoothingType"=dword:00000002\n'
+        '"FontSmoothingOrientation"=dword:00000001\n\n'
+        "[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\ThemeManager]\n"
+        '"ThemeActive"="0"\n\n'
+        "[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize]\n"
+        f'"AppsUseLightTheme"=dword:{apps_light}\n'
+        f'"SystemUsesLightTheme"=dword:{apps_light}\n\n'
+        "[HKEY_CURRENT_USER\\Control Panel\\Colors]\n"
+        f"{colors}\n"
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".reg", delete=False, encoding="utf-8") as tf:
+        tf.write(reg_content)
+        reg_file = Path(tf.name)
+    try:
+        env = _wine_env(prefix, wayland=wayland, dxvk=dxvk)
+        run_cmd(["wine", "regedit", "/S", str(reg_file)], env=env, timeout=30)
+    finally:
+        reg_file.unlink(missing_ok=True)
+
+
+def _ensure_prefix(slug: str, *, sandbox: bool, wayland: bool, dxvk: bool) -> Path:
+    validate_slug(slug)
+    prefix = prefixes_dir() / slug
+    meta_file = prefix / ".tsukuyomi-prefix.json"
+    is_new = not (prefix / "drive_c").is_dir()
+    prefix.mkdir(parents=True, exist_ok=True)
+    if is_new:
+        env = _wine_env(prefix, wayland=wayland, dxvk=dxvk)
+        run_cmd(["wineboot", "--init"], env=env, timeout=120)
+        run_cmd(["wineserver", "-w"], env=env, timeout=60)
+    _apply_prefix_hardening_and_theme(prefix, sandbox=sandbox, wayland=wayland, dxvk=dxvk)
+    atomic_write_json(
+        meta_file,
+        {
+            "slug": slug,
+            "sandbox": sandbox,
+            "wayland": wayland,
+            "dxvk": dxvk,
+            "updatedAt": int(time.time()),
+        },
+    )
+    return prefix
+
+
+def _start_menu_dirs(prefix: Path) -> list[Path]:
+    user = os.environ.get("USER") or Path.home().name
+    return [
+        prefix / "drive_c" / "ProgramData" / "Microsoft" / "Windows" / "Start Menu",
+        prefix / "drive_c" / "users" / user / "AppData" / "Roaming" / "Microsoft" / "Windows" / "Start Menu",
+    ]
+
+
+def _snapshot_lnk_and_exe(prefix: Path) -> tuple[set[Path], set[Path]]:
+    lnks: set[Path] = set()
+    for d in _start_menu_dirs(prefix):
+        if d.is_dir():
+            lnks.update(p for p in d.rglob("*.lnk") if p.is_file())
+    exes: set[Path] = set()
+    for base in (
+        prefix / "drive_c" / "Program Files",
+        prefix / "drive_c" / "Program Files (x86)",
+    ):
+        if base.is_dir():
+            exes.update(p for p in base.rglob("*.exe") if p.is_file())
+    return lnks, exes
+
+
+def _win_to_prefix_path(prefix: Path, win_path: str) -> Optional[Path]:
+    clean = win_path.strip().strip('"')
+    if len(clean) >= 3 and clean[1] == ":" and clean[2] in ("\\", "/"):
+        drive = clean[0].lower()
+        rel = clean[3:].replace("\\", "/").lstrip("/")
+        if drive == "c":
+            candidate = prefix / "drive_c" / rel
+            if candidate.exists():
+                return candidate
+            # Case-insensitive fallback on Linux ext4/btrfs
+            cur = prefix / "drive_c"
+            for part in Path(rel).parts:
+                if not cur.is_dir():
+                    return None
+                match = next((c for c in cur.iterdir() if c.name.lower() == part.lower()), None)
+                if match is None:
+                    return None
+                cur = match
+            return cur
+    return None
+
+
+def _is_clutter_exe(path: Path) -> bool:
+    stem = path.stem.lower()
+    return any(tok in stem for tok in SKIP_EXE_STEMS)
+
+
+def scan_shortcuts(prefix: Path, before_lnks: Optional[set[Path]] = None, before_exes: Optional[set[Path]] = None) -> list[dict[str, object]]:
+    from win_lnk import parse_lnk
+
+    after_lnks, after_exes = _snapshot_lnk_and_exe(prefix)
+    new_lnks = sorted(after_lnks - (before_lnks or set()))
+    if not new_lnks:
+        new_lnks = sorted(after_lnks)
+
+    candidates: list[dict[str, object]] = []
+    seen_targets: set[str] = set()
+
+    for lnk in new_lnks:
+        parsed = parse_lnk(lnk)
+        if not parsed or not parsed.get("target"):
+            continue
+        resolved = _win_to_prefix_path(prefix, parsed["target"])
+        if not resolved or not resolved.is_file() or resolved.suffix.lower() != ".exe":
+            continue
+        if _is_clutter_exe(resolved) or "uninstall" in lnk.stem.lower():
+            continue
+        key = str(resolved).lower()
+        if key in seen_targets:
+            continue
+        seen_targets.add(key)
+        candidates.append(
+            {
+                "name": sanitize_desktop_value(lnk.stem, resolved.stem),
+                "exe": str(resolved),
+                "args": parsed.get("arguments", ""),
+                "source": "shortcut",
+            }
+        )
+
+    if not candidates:
+        pool = sorted(after_exes - (before_exes or set())) or sorted(after_exes)
+        for exe in pool:
+            if _is_clutter_exe(exe):
+                continue
+            key = str(exe).lower()
+            if key in seen_targets:
+                continue
+            seen_targets.add(key)
+            pe_info = inspect_pe(exe)
+            candidates.append(
+                {
+                    "name": sanitize_desktop_value(str(pe_info.get("product_name") or exe.stem), exe.stem),
+                    "exe": str(exe),
+                    "args": "",
+                    "source": "executable",
+                }
+            )
+            if len(candidates) >= 12:
+                break
+
+    return candidates
+
+
+def _unique_app_id(base_name: str) -> str:
+    base = slugify(base_name, "win-app")
+    candidate = base
+    idx = 2
+    while (apps_dir() / f"{candidate}.json").exists():
+        candidate = f"{base[:56]}-{idx}"
+        idx += 1
+    return candidate
+
+
+def _write_desktop_entry(app_rec: dict[str, object]) -> None:
+    app_id = validate_slug(str(app_rec["id"]))
+    name = sanitize_desktop_value(str(app_rec["name"]), app_id)
+    exe_path = Path(str(app_rec["exe"]))
+    wm_class = sanitize_desktop_value(str(app_rec.get("wm_class") or exe_path.name), exe_path.name)
+
+    icon_dst = icons_hicolor_dir() / f"tsukuyomi-win-{app_id}.png"
+    icon_name = "application-x-ms-dos-executable"
+    if extract_exe_icon_png(exe_path, icon_dst):
+        icon_name = f"tsukuyomi-win-{app_id}"
+        app_rec["icon_path"] = str(icon_dst)
+
+    exec_cmd = format_desktop_exec(["/usr/lib/tsukuyomi/win-launch", app_id]) + " %U"
+    action_prefix = format_desktop_exec(["/usr/lib/tsukuyomi/tsukuyomi-win", "open-prefix", app_id])
+    action_cfg = format_desktop_exec(["/usr/lib/tsukuyomi/tsukuyomi-win", "winecfg", app_id])
+    action_wayland = format_desktop_exec(["/usr/lib/tsukuyomi/tsukuyomi-win", "toggle-wayland", app_id])
+    action_uninstall = format_desktop_exec(["/usr/lib/tsukuyomi/tsukuyomi-win", "uninstall", app_id])
+
+    desktop_content = (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name={name}\n"
+        "GenericName=Windows App\n"
+        f"Comment=Run {name} via Tsukuyomi WinBridge\n"
+        f"Exec={exec_cmd}\n"
+        f"Icon={icon_name}\n"
+        "Terminal=false\n"
+        f"StartupWMClass={wm_class}\n"
+        "Categories=Utility;X-Tsukuyomi-Windows;\n"
+        f"Keywords=windows;exe;wine;{app_rec['slug']};\n"
+        "X-Tsukuyomi-Runtime=windows\n"
+        f"X-Tsukuyomi-AppId={app_id}\n"
+        "Actions=OpenPrefix;WineCfg;ToggleWayland;Uninstall;\n\n"
+        "[Desktop Action OpenPrefix]\n"
+        "Name=Open Drive C: Folder\n"
+        f"Exec={action_prefix}\n\n"
+        "[Desktop Action WineCfg]\n"
+        "Name=Wine Settings\n"
+        f"Exec={action_cfg}\n\n"
+        "[Desktop Action ToggleWayland]\n"
+        "Name=Toggle Native Wayland Driver\n"
+        f"Exec={action_wayland}\n\n"
+        "[Desktop Action Uninstall]\n"
+        "Name=Uninstall Windows App\n"
+        f"Exec={action_uninstall}\n"
+    )
+    atomic_write_text(applications_dir() / f"tsukuyomi-win-{app_id}.desktop", desktop_content)
+    atomic_write_json(apps_dir() / f"{app_id}.json", app_rec)
+    refresh_desktop_caches()
+
+
+def _run_with_bwrap(argv: list[str], *, env: dict[str, str], prefix: Path, extra_ro_paths: list[Path], cwd: Optional[Path]) -> int:
+    if not shutil.which("bwrap"):
+        return subprocess.run(argv, env=env, cwd=str(cwd) if cwd else None, shell=False).returncode
+
+    bwrap: list[str] = [
+        "bwrap",
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
+        "--dev", "/dev",
+        "--proc", "/proc",
+        "--tmpfs", "/tmp",
+    ]
+    for sys_dir in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"):
+        if Path(sys_dir).exists():
+            bwrap.extend(["--ro-bind", sys_dir, sys_dir])
+    if Path("/dev/dri").exists():
+        bwrap.extend(["--dev-bind", "/dev/dri", "/dev/dri"])
+    if Path("/dev/ntsync").exists():
+        bwrap.extend(["--dev-bind", "/dev/ntsync", "/dev/ntsync"])
+    if Path("/tmp/.X11-unix").exists():
+        bwrap.extend(["--bind", "/tmp/.X11-unix", "/tmp/.X11-unix"])
+
+    rt = xdg_runtime_dir()
+    if rt.is_dir():
+        bwrap.extend(["--dir", str(rt)])
+        for sock_name in filter(None, [env.get("WAYLAND_DISPLAY"), "pipewire-0", "pulse", "bus"]):
+            sock = rt / sock_name
+            if sock.exists():
+                bwrap.extend(["--bind", str(sock), str(sock)])
+
+    bwrap.extend(["--dir", str(Path.home())])
+    bwrap.extend(["--bind", str(prefix), str(prefix)])
+
+    shared = shared_dir()
+    shared.mkdir(parents=True, exist_ok=True)
+    bwrap.extend(["--bind", str(shared), str(shared)])
+
+    for ro in extra_ro_paths:
+        if ro.exists():
+            bwrap.extend(["--ro-bind", str(ro), str(ro)])
+
+    if cwd and cwd.is_dir():
+        bwrap.extend(["--chdir", str(cwd)])
+
+    bwrap.append("--")
+    bwrap.extend(argv)
+    return subprocess.run(bwrap, env=env, shell=False).returncode
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    src = Path(args.file).expanduser().resolve()
+    if not src.is_file():
+        print(json.dumps({"ok": False, "error": f"File not found: {src}"}))
+        return 1
+
+    cfg = load_config()
+    mode = args.mode
+    sandbox = args.sandbox if args.sandbox is not None else bool(cfg["defaultSandbox"])
+    wayland = args.wayland if args.wayland is not None else bool(cfg["defaultWayland"])
+    dxvk = args.dxvk if args.dxvk is not None else bool(cfg["defaultDxvk"])
+    runner = args.runner or str(cfg["defaultRunner"])
+
+    pe_info = inspect_pe(src)
+    app_name = sanitize_desktop_value(args.name or str(pe_info.get("product_name") or src.stem), src.stem)
+
+    if mode == "existing":
+        slug = validate_slug(args.slug)
+    else:
+        base_slug = slugify(args.slug or app_name, "win-app")
+        slug = base_slug
+        if mode == "isolated" and (prefixes_dir() / slug).exists():
+            idx = 2
+            while (prefixes_dir() / f"{base_slug[:56]}-{idx}").exists():
+                idx += 1
+            slug = f"{base_slug[:56]}-{idx}"
+
+    if mode == "portable" and not args.pin_portable:
+        prefix = _ensure_prefix("portable-sandbox", sandbox=sandbox, wayland=wayland, dxvk=dxvk)
+        env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, runner=runner)
+        argv = (["umu-run"] if runner == "umu" and shutil.which("umu-run") else ["wine"]) + [str(src)]
+        if sandbox:
+            rc = _run_with_bwrap(argv, env=env, prefix=prefix, extra_ro_paths=[src.parent], cwd=src.parent)
+        else:
+            rc = subprocess.run(argv, env=env, cwd=str(src.parent), shell=False).returncode
+        print(json.dumps({"ok": rc == 0, "exitCode": rc, "mode": "portable", "candidates": []}))
+        return 0 if rc == 0 else 1
+
+    prefix = _ensure_prefix(slug, sandbox=sandbox, wayland=wayland, dxvk=dxvk)
+    before_lnks, before_exes = _snapshot_lnk_and_exe(prefix)
+
+    env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, runner=runner)
+    pid_file = xdg_runtime_dir() / f"tsukuyomi-win-install-{slug}.pid"
+
+    if mode == "portable" and args.pin_portable:
+        dest_dir = prefix / "drive_c" / "Program Files" / slug
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src.parent, dest_dir, dirs_exist_ok=True)
+        installed_exe = dest_dir / src.name
+        app_id = _unique_app_id(app_name)
+        rec = {
+            "id": app_id,
+            "slug": slug,
+            "name": app_name,
+            "exe": str(installed_exe),
+            "args": "",
+            "runner": runner,
+            "wayland": wayland,
+            "sandbox": sandbox,
+            "dxvk": dxvk,
+            "wm_class": installed_exe.name,
+            "created_at": int(time.time()),
+        }
+        _write_desktop_entry(rec)
+        print(json.dumps({"ok": True, "slug": slug, "exported": [rec]}))
+        return 0
+
+    if src.suffix.lower() == ".msi":
+        argv = ["msiexec", "/i", str(src)]
+    else:
+        argv = (["umu-run"] if runner == "umu" and shutil.which("umu-run") else ["wine"]) + [str(src)]
+
+    proc = subprocess.Popen(argv, env=env, cwd=str(src.parent), shell=False)
+    atomic_write_text(pid_file, str(proc.pid))
+    try:
+        rc = proc.wait()
+    finally:
+        pid_file.unlink(missing_ok=True)
+
+    run_cmd(["wineserver", "-w"], env=env, timeout=30)
+    candidates = scan_shortcuts(prefix, before_lnks, before_exes)
+    print(
+        json.dumps(
+            {
+                "ok": rc == 0,
+                "exitCode": rc,
+                "slug": slug,
+                "prefix": str(prefix),
+                "runner": runner,
+                "wayland": wayland,
+                "sandbox": sandbox,
+                "dxvk": dxvk,
+                "candidates": candidates,
+            }
+        )
+    )
+    return 0 if rc == 0 else 1
+
+
+def cmd_export_desktop(args: argparse.Namespace) -> int:
+    slug = validate_slug(args.slug)
+    prefix = prefixes_dir() / slug
+    if not prefix.is_dir():
+        print(json.dumps({"ok": False, "error": f"Unknown prefix: {slug}"}))
+        return 1
+    meta = read_json(prefix / ".tsukuyomi-prefix.json", {})
+    if not isinstance(meta, dict):
+        meta = {}
+    selected = json.loads(args.select)
+    exported = []
+    for item in selected:
+        exe = Path(str(item["exe"]))
+        if not exe.is_file():
+            continue
+        name = sanitize_desktop_value(str(item.get("name") or exe.stem), exe.stem)
+        app_id = _unique_app_id(name)
+        rec = {
+            "id": app_id,
+            "slug": slug,
+            "name": name,
+            "exe": str(exe),
+            "args": sanitize_desktop_value(str(item.get("args") or "")),
+            "runner": str(item.get("runner") or meta.get("runner") or "wine"),
+            "wayland": bool(item.get("wayland", meta.get("wayland", False))),
+            "sandbox": bool(item.get("sandbox", meta.get("sandbox", True))),
+            "dxvk": bool(item.get("dxvk", meta.get("dxvk", True))),
+            "wm_class": exe.name,
+            "created_at": int(time.time()),
+        }
+        _write_desktop_entry(rec)
+        exported.append(rec)
+    print(json.dumps({"ok": True, "exported": exported}))
+    return 0
+
+
+def _convert_arg_for_wine(prefix: Path, arg: str, env: dict[str, str]) -> str:
+    p = Path(arg)
+    if arg.startswith(("http://", "https://")) or not (arg.startswith("/") or p.exists()):
+        return arg
+    res = run_cmd(["winepath", "-w", str(p.resolve())], env=env, timeout=5)
+    if res.returncode == 0 and res.stdout.strip():
+        return res.stdout.strip()
+    return arg
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    app_id = validate_slug(args.app_id)
+    rec = read_json(apps_dir() / f"{app_id}.json")
+    if not isinstance(rec, dict):
+        print(f"tsukuyomi-win: app not found: {app_id}", file=sys.stderr)
+        return 1
+
+    slug = validate_slug(str(rec["slug"]))
+    prefix = prefixes_dir() / slug
+    exe = Path(str(rec["exe"]))
+    if not exe.is_file():
+        print(f"tsukuyomi-win: executable missing: {exe}", file=sys.stderr)
+        return 1
+
+    wayland = bool(rec.get("wayland", False))
+    dxvk = bool(rec.get("dxvk", True))
+    sandbox = bool(rec.get("sandbox", True))
+    runner = str(rec.get("runner") or "wine")
+
+    _apply_prefix_hardening_and_theme(prefix, sandbox=sandbox, wayland=wayland, dxvk=dxvk)
+    env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, runner=runner)
+
+    extra_args = shlex.split(str(rec.get("args") or ""))
+    converted_user_args: list[str] = []
+    ro_mounts: list[Path] = []
+    for raw in args.extra_args:
+        p = Path(raw)
+        if p.exists():
+            ro_mounts.append(p.resolve().parent if p.is_file() else p.resolve())
+        converted_user_args.append(_convert_arg_for_wine(prefix, raw, env))
+
+    base_bin = ["umu-run"] if runner == "umu" and shutil.which("umu-run") else ["wine"]
+    argv = base_bin + [str(exe)] + extra_args + converted_user_args
+
+    if sandbox and runner != "umu":
+        return _run_with_bwrap(argv, env=env, prefix=prefix, extra_ro_paths=ro_mounts, cwd=exe.parent)
+    return subprocess.run(argv, env=env, cwd=str(exe.parent), shell=False).returncode
+
+
+def cmd_list(_args: argparse.Namespace) -> int:
+    apps = []
+    if apps_dir().is_dir():
+        for f in sorted(apps_dir().glob("*.json")):
+            data = read_json(f)
+            if isinstance(data, dict):
+                apps.append(data)
+    prefixes = []
+    if prefixes_dir().is_dir():
+        for d in sorted(prefixes_dir().iterdir()):
+            if d.is_dir():
+                meta = read_json(d / ".tsukuyomi-prefix.json", {})
+                prefixes.append({"slug": d.name, "path": str(d), "meta": meta if isinstance(meta, dict) else {}})
+    print(json.dumps({"apps": apps, "prefixes": prefixes}))
+    return 0
+
+
+def cmd_configure(args: argparse.Namespace) -> int:
+    app_id = validate_slug(args.app_id)
+    rec = read_json(apps_dir() / f"{app_id}.json")
+    if not isinstance(rec, dict):
+        print(json.dumps({"ok": False, "error": f"App not found: {app_id}"}))
+        return 1
+    if args.runner in ("wine", "umu"):
+        rec["runner"] = args.runner
+    if args.wayland is not None:
+        rec["wayland"] = args.wayland
+    if args.sandbox is not None:
+        rec["sandbox"] = args.sandbox
+    if args.dxvk is not None:
+        rec["dxvk"] = args.dxvk
+    _write_desktop_entry(rec)
+    print(json.dumps({"ok": True, "app": rec}))
+    return 0
+
+
+def cmd_toggle_wayland(args: argparse.Namespace) -> int:
+    app_id = validate_slug(args.app_id)
+    rec = read_json(apps_dir() / f"{app_id}.json")
+    if not isinstance(rec, dict):
+        return 1
+    rec["wayland"] = not bool(rec.get("wayland", False))
+    _write_desktop_entry(rec)
+    mode_txt = "Native Wayland" if rec["wayland"] else "XWayland"
+    if shutil.which("notify-send"):
+        run_cmd(["notify-send", "Tsukuyomi WinBridge", f"{rec['name']}: switched to {mode_txt}"])
+    return 0
+
+
+def cmd_open_prefix(args: argparse.Namespace) -> int:
+    app_id = validate_slug(args.app_id)
+    rec = read_json(apps_dir() / f"{app_id}.json")
+    if not isinstance(rec, dict):
+        return 1
+    drive_c = prefixes_dir() / validate_slug(str(rec["slug"])) / "drive_c"
+    if drive_c.is_dir() and shutil.which("xdg-open"):
+        subprocess.Popen(["xdg-open", str(drive_c)], shell=False)
+    return 0
+
+
+def cmd_tool(args: argparse.Namespace, tool: str) -> int:
+    app_id = validate_slug(args.app_id)
+    rec = read_json(apps_dir() / f"{app_id}.json")
+    if not isinstance(rec, dict):
+        return 1
+    prefix = prefixes_dir() / validate_slug(str(rec["slug"]))
+    env = _wine_env(prefix, wayland=bool(rec.get("wayland", False)), dxvk=bool(rec.get("dxvk", True)))
+    if tool == "winecfg":
+        return subprocess.run(["winecfg"], env=env, shell=False).returncode
+    if tool == "winetricks" and shutil.which("winetricks"):
+        return subprocess.run(["winetricks", "--gui"], env=env, shell=False).returncode
+    return 1
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    app_id = validate_slug(args.app_id)
+    rec_path = apps_dir() / f"{app_id}.json"
+    rec = read_json(rec_path)
+    if not isinstance(rec, dict):
+        print(json.dumps({"ok": False, "error": f"App not found: {app_id}"}))
+        return 1
+    slug = validate_slug(str(rec["slug"]))
+    (applications_dir() / f"tsukuyomi-win-{app_id}.desktop").unlink(missing_ok=True)
+    (icons_hicolor_dir() / f"tsukuyomi-win-{app_id}.png").unlink(missing_ok=True)
+    rec_path.unlink(missing_ok=True)
+
+    # Remove prefix only if no remaining apps reference this slug
+    still_used = False
+    if apps_dir().is_dir():
+        for other in apps_dir().glob("*.json"):
+            data = read_json(other)
+            if isinstance(data, dict) and data.get("slug") == slug:
+                still_used = True
+                break
+    if not still_used:
+        prefix = prefixes_dir() / slug
+        if prefix.is_dir():
+            run_cmd(["wineserver", "-k"], env=_wine_env(prefix), timeout=10)
+            shutil.rmtree(prefix, ignore_errors=True)
+
+    refresh_desktop_caches()
+    print(json.dumps({"ok": True, "removed": app_id, "prefixRemoved": not still_used}))
+    return 0
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    slug = validate_slug(args.slug)
+    pid_file = xdg_runtime_dir() / f"tsukuyomi-win-install-{slug}.pid"
+    if pid_file.is_file():
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+            os.kill(pid, signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+        pid_file.unlink(missing_ok=True)
+    prefix = prefixes_dir() / slug
+    if prefix.is_dir():
+        run_cmd(["wineserver", "-k"], env=_wine_env(prefix), timeout=10)
+        if args.cleanup:
+            shutil.rmtree(prefix, ignore_errors=True)
+    print(json.dumps({"ok": True}))
+    return 0
+
+
+def parse_bool_str(v: str) -> bool:
+    low = v.strip().lower()
+    if low in ("1", "true", "yes", "on"):
+        return True
+    if low in ("0", "false", "no", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected boolean, got {v!r}")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="tsukuyomi-win")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status")
+    sub.add_parser("list")
+
+    p_ins = sub.add_parser("inspect")
+    p_ins.add_argument("file")
+
+    p_inst = sub.add_parser("install")
+    p_inst.add_argument("--file", required=True)
+    p_inst.add_argument("--name", default="")
+    p_inst.add_argument("--mode", choices=("isolated", "portable", "existing"), default="isolated")
+    p_inst.add_argument("--slug", default="")
+    p_inst.add_argument("--runner", choices=("wine", "umu"), default="")
+    p_inst.add_argument("--wayland", type=parse_bool_str, default=None)
+    p_inst.add_argument("--sandbox", type=parse_bool_str, default=None)
+    p_inst.add_argument("--dxvk", type=parse_bool_str, default=None)
+    p_inst.add_argument("--pin-portable", action="store_true")
+
+    p_exp = sub.add_parser("export-desktop")
+    p_exp.add_argument("slug")
+    p_exp.add_argument("--select", required=True)
+
+    p_run = sub.add_parser("run")
+    p_run.add_argument("app_id")
+    p_run.add_argument("extra_args", nargs=argparse.REMAINDER)
+
+    p_cfg = sub.add_parser("configure")
+    p_cfg.add_argument("app_id")
+    p_cfg.add_argument("--runner", choices=("wine", "umu"), default="")
+    p_cfg.add_argument("--wayland", type=parse_bool_str, default=None)
+    p_cfg.add_argument("--sandbox", type=parse_bool_str, default=None)
+    p_cfg.add_argument("--dxvk", type=parse_bool_str, default=None)
+
+    p_def = sub.add_parser("set-defaults")
+    p_def.add_argument("--runner", choices=("wine", "umu"), default="")
+    p_def.add_argument("--wayland", type=parse_bool_str, default=None)
+    p_def.add_argument("--sandbox", type=parse_bool_str, default=None)
+    p_def.add_argument("--dxvk", type=parse_bool_str, default=None)
+
+    for simple in ("toggle-wayland", "open-prefix", "winecfg", "winetricks", "uninstall"):
+        sp = sub.add_parser(simple)
+        sp.add_argument("app_id")
+
+    p_can = sub.add_parser("cancel")
+    p_can.add_argument("slug")
+    p_can.add_argument("--cleanup", action="store_true")
+
+    args = parser.parse_args(argv)
+    if args.cmd == "status":
+        print(json.dumps(check_status()))
+        return 0
+    if args.cmd == "inspect":
+        src = Path(args.file).expanduser().resolve()
+        info = inspect_pe(src)
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+            icon_tmp = Path(tf.name)
+        if extract_exe_icon_png(src, icon_tmp):
+            info["icon_preview"] = str(icon_tmp)
+        else:
+            icon_tmp.unlink(missing_ok=True)
+            info["icon_preview"] = ""
+        print(json.dumps(info))
+        return 0
+    if args.cmd == "install":
+        return cmd_install(args)
+    if args.cmd == "export-desktop":
+        return cmd_export_desktop(args)
+    if args.cmd == "run":
+        return cmd_run(args)
+    if args.cmd == "list":
+        return cmd_list(args)
+    if args.cmd == "configure":
+        return cmd_configure(args)
+    if args.cmd == "set-defaults":
+        cfg = load_config()
+        if args.runner:
+            cfg["defaultRunner"] = args.runner
+        if args.wayland is not None:
+            cfg["defaultWayland"] = args.wayland
+        if args.sandbox is not None:
+            cfg["defaultSandbox"] = args.sandbox
+        if args.dxvk is not None:
+            cfg["defaultDxvk"] = args.dxvk
+        save_config(cfg)
+        print(json.dumps({"ok": True, "config": cfg}))
+        return 0
+    if args.cmd == "toggle-wayland":
+        return cmd_toggle_wayland(args)
+    if args.cmd == "open-prefix":
+        return cmd_open_prefix(args)
+    if args.cmd in ("winecfg", "winetricks"):
+        return cmd_tool(args, args.cmd)
+    if args.cmd == "uninstall":
+        return cmd_uninstall(args)
+    if args.cmd == "cancel":
+        return cmd_cancel(args)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
