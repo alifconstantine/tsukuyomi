@@ -168,6 +168,9 @@ def inspect_android_package(pkg_path: Path, icon_out: Optional[Path] = None) -> 
     if not pkg_path.is_file():
         info["error"] = f"File not found: {pkg_path}"
         return info
+    if suffix not in (".apk", ".xapk", ".apkm"):
+        info["error"] = "Choose an .apk, .xapk or .apkm file."
+        return info
 
     try:
         if suffix == ".apk":
@@ -210,10 +213,7 @@ def inspect_android_package(pkg_path: Path, icon_out: Optional[Path] = None) -> 
                         except (OSError, json.JSONDecodeError):
                             pass
                 if isinstance(meta, dict):
-                    pkg_name = sanitize_desktop_value(str(meta.get("package_name") or meta.get("pname") or ""))
                     app_name = sanitize_desktop_value(str(meta.get("name") or meta.get("app_name") or ""))
-                    if pkg_name:
-                        info["package"] = pkg_name
                     if app_name:
                         info["name"] = app_name
                     info["version_name"] = sanitize_desktop_value(str(meta.get("version_name") or meta.get("release_version") or ""))
@@ -221,11 +221,18 @@ def inspect_android_package(pkg_path: Path, icon_out: Optional[Path] = None) -> 
 
                 # Inspect base/all split APKs for ABIs and icon fallback
                 abis_set: set[str] = set()
-                apks = [p for p in extracted if p.suffix.lower() == ".apk"]
+                apks = sorted(
+                    (p for p in extracted if p.suffix.lower() == ".apk"),
+                    key=lambda path: (path.name != "base.apk", path),
+                )
                 for apk in apks:
                     sub = inspect_android_package(apk, icon_out if not info["icon_extracted"] else None)
-                    if not info["package"] and sub.get("package"):
+                    if sub.get("error"):
+                        raise ValueError(f"{apk.name} is not a valid Android package.")
+                    if not info["package"]:
                         info["package"] = sub["package"]
+                    elif sub["package"] != info["package"]:
+                        raise ValueError("The bundled APKs belong to different apps.")
                     if info["name"] == pkg_path.stem and sub.get("name") and sub["name"] != apk.stem:
                         info["name"] = sub["name"]
                     if not info["version_name"] and sub.get("version_name"):
@@ -256,5 +263,7 @@ def inspect_android_package(pkg_path: Path, icon_out: Optional[Path] = None) -> 
             validate_android_pkg(str(info["package"]))
         except ValueError:
             info["package"] = ""
+    if not info["package"]:
+        info["error"] = "This file does not contain a valid Android app manifest."
 
     return info

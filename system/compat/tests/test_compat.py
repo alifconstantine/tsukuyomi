@@ -10,6 +10,7 @@ import json
 import os
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -280,6 +281,57 @@ class CompatTests(unittest.TestCase):
     def test_file_uri_decoding(self) -> None:
         self.assertEqual(tsukuyomi_win._decode_uri_path("file:///home/u/My%20Setup.exe"), "/home/u/My Setup.exe")
         self.assertEqual(tsukuyomi_win._decode_uri_path("/plain/path.exe"), "/plain/path.exe")
+
+    def test_windows_cancel_cleans_only_the_new_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": tmp, "XDG_RUNTIME_DIR": tmp}):
+                installed = tsukuyomi_win.prefixes_dir() / "demo"
+                installed.mkdir(parents=True)
+                with self.assertRaises(tsukuyomi_win.InstallCancelled):
+                    with tsukuyomi_win._installation_prefix("demo", fresh=True) as work:
+                        self.assertEqual(work.name, "demo-2")
+                        raise tsukuyomi_win.InstallCancelled
+                self.assertTrue(installed.is_dir())
+                self.assertFalse(work.exists())
+
+    def test_windows_scan_does_not_export_unchanged_apps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            existing = prefix / "drive_c" / "Program Files" / "Existing.exe"
+            existing.parent.mkdir(parents=True)
+            existing.touch()
+            before = tsukuyomi_win._snapshot_lnk_and_exe(prefix)
+            self.assertEqual(tsukuyomi_win.scan_shortcuts(prefix, *before), [])
+            new_app = existing.with_name("New App.exe")
+            new_app.touch()
+            self.assertEqual([app["exe"] for app in tsukuyomi_win.scan_shortcuts(prefix, *before)], [str(new_app)])
+
+    def test_android_install_requires_package_manager_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            apk = io.BytesIO()
+            with zipfile.ZipFile(apk, "w") as zf:
+                zf.writestr("AndroidManifest.xml", _build_synthetic_axml("org.tsukuyomi.demo", "1", "Demo"))
+            bundle = Path(tmp) / "Demo.xapk"
+            with zipfile.ZipFile(bundle, "w") as zf:
+                zf.writestr("base.apk", apk.getvalue())
+            out = io.StringIO()
+            failed = subprocess.CompletedProcess([], 0, "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]", "")
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": tmp, "XDG_RUNTIME_DIR": tmp}), \
+                 mock.patch.object(tsukuyomi_droid, "_ensure_container_and_session", return_value=True), \
+                 mock.patch.object(tsukuyomi_droid, "_adb_waydroid", return_value=failed), \
+                 mock.patch("sys.stdout", out):
+                result = tsukuyomi_droid.main(["install", str(bundle)])
+                self.assertFalse(tsukuyomi_droid.apps_db_path().exists())
+            self.assertEqual(result, 1)
+            self.assertFalse(json.loads(out.getvalue())["ok"])
+
+    def test_android_adb_does_not_guess_a_container_address(self) -> None:
+        with mock.patch.object(tsukuyomi_droid.shutil, "which", return_value="/usr/bin/adb"), \
+             mock.patch.object(tsukuyomi_droid, "_waydroid_ip", return_value=None), \
+             mock.patch.object(tsukuyomi_droid, "run_cmd") as run:
+            result = tsukuyomi_droid._adb_waydroid("install", "app.apk")
+        self.assertNotEqual(result.returncode, 0)
+        run.assert_not_called()
 
 
 if __name__ == "__main__":

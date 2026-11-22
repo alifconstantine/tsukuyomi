@@ -109,9 +109,15 @@ def cmd_init(args: argparse.Namespace) -> int:
     if args.drm_node and DRM_NODE_RE.match(args.drm_node) and Path(args.drm_node).exists():
         _update_cfg_section("waydroid", {"drm_device": args.drm_node})
 
-    run_cmd(["waydroid", "upgrade", "--offline"])
-    run_cmd(["systemctl", "enable", "waydroid-container.service"])
-    run_cmd(["systemctl", "restart", "waydroid-container.service"])
+    for command in (
+        ["waydroid", "upgrade", "--offline"],
+        ["systemctl", "enable", "waydroid-container.service"],
+        ["systemctl", "restart", "waydroid-container.service"],
+    ):
+        result = run_cmd(command)
+        if result.returncode != 0:
+            sys.stderr.write(result.stderr or result.stdout or "Android setup could not finish.\n")
+            return result.returncode
     return 0
 
 

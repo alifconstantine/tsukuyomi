@@ -25,9 +25,11 @@ if [[ -r $state_file ]]; then
 fi
 next=$(( (idx + 1) % ${#presets[@]} ))
 preset="${presets[$next]}"
-printf '%s\n' "$next" > "$state_file"
-
-/usr/lib/tsukuyomi/tsukuyomi-droid resize "$preset" >/dev/null 2>&1 || true
-if command -v notify-send >/dev/null 2>&1; then
-    notify-send -a "Tsukuyomi DroidBridge" -t 1600 "Android Viewport" "Switched to $preset" || true
+if /usr/lib/tsukuyomi/tsukuyomi-droid resize "$preset" >/dev/null; then
+    printf '%s\n' "$next" > "$state_file"
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -a "Tsukuyomi" -t 1600 "Android window" "Switched to $preset" || true
+    fi
+elif command -v notify-send >/dev/null 2>&1; then
+    notify-send -a "Tsukuyomi" "Android window could not resize" "Check Android status in Tsukuyomi Hub → Compatibility." || true
 fi

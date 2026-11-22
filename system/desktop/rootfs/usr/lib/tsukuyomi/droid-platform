@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Call Waydroid's package service and return the Android operation result."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+from compat_common import validate_android_pkg
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("operation", choices=("install", "remove", "installed"))
+    parser.add_argument("target")
+    args = parser.parse_args()
+
+    sys.path.insert(0, "/usr/lib/waydroid")
+    from tools import config
+    from tools.helpers.ipc import DBusContainerService, DBusSessionService
+    from tools.interfaces import IPlatform
+
+    DBusSessionService()
+    container = DBusContainerService()
+    session = container.GetSession()
+    if int(session.get("user_id", -1)) != os.getuid():
+        raise ValueError("Start Android in this desktop session first.")
+    frozen = session["state"] == "FROZEN"
+    if frozen:
+        container.Unfreeze()
+    try:
+        work = config.defaults["work"]
+        service = IPlatform.get_service(SimpleNamespace(work=work, config=f"{work}/waydroid.cfg"))
+        if service is None:
+            raise ValueError("Android's package service is unavailable.")
+
+        if args.operation == "install":
+            # Waydroid mounts this user's data directory at /data in Android.
+            staging = Path(str(session["waydroid_data"])) / "waydroid_tmp"
+            staging.mkdir(mode=0o755, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="tsukuyomi-", dir=staging) as temp:
+                temp_path = Path(temp)
+                temp_path.chmod(0o755)
+                apk = temp_path / "base.apk"
+                shutil.copyfile(args.target, apk)
+                apk.chmod(0o644)
+                result = service.installApp(f"/data/waydroid_tmp/{temp_path.name}/base.apk")
+        else:
+            package = validate_android_pkg(args.target)
+            if args.operation == "installed":
+                return 0 if service.getAppName(package) else 1
+            if not service.getAppName(package):
+                return 0
+            # The bundled Android 13 service's removeApp creates an uninstall
+            # PendingIntent without a mutability flag. Use Android's own
+            # confirmation activity and verify the package disappeared.
+            activity = service.launchIntent("android.intent.action.DELETE", f"package:{package}")
+            if not activity:
+                raise ValueError("Android could not open its uninstall dialog.")
+            service.setprop("waydroid.active_apps", activity)
+            deadline = time.monotonic() + 75
+            while time.monotonic() < deadline:
+                if not service.getAppName(package):
+                    return 0
+                time.sleep(1)
+            raise ValueError("Confirm removal in the Android uninstall dialog and try again.")
+
+        if result != 0:
+            raise ValueError(f"Android could not install the app (package service result {result}).")
+        return 0
+    finally:
+        if frozen:
+            container.Freeze()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
