@@ -102,6 +102,7 @@ vkd3d-proton-mingw-git
 vkd3d
 lib32-vkd3d
 lib32-pipewire
+lib32-libpulse
 lib32-gnutls
 bubblewrap
 icoutils

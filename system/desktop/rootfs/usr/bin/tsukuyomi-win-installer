@@ -10,6 +10,10 @@ for arg in "$@"; do
     esac
 done
 
+if [[ -n $target && -e $target ]]; then
+    target=$(realpath -- "$target")
+fi
+
 qml="/usr/share/tsukuyomi/compat/WinInstaller.qml"
 if [[ ! -f $qml && -f "$HOME/.config/quickshell/compat/WinInstaller.qml" ]]; then
     qml="$HOME/.config/quickshell/compat/WinInstaller.qml"

@@ -87,6 +87,9 @@ prepare_profile() {
     fi
     [[ -x "$workspace_scripts/sync-to-iso.sh" ]] ||
         die "Building the ISO requires the Tsukuyomi OS workspace and shell checkout."
+    if [[ -x "$src_dir/installer/fetch-compat-apks.sh" ]]; then
+        "${as_builder[@]}" "$src_dir/installer/fetch-compat-apks.sh"
+    fi
     "${as_builder[@]}" "$src_dir/installer/build-ryoku-repo.sh"
     if ! $online_only; then
         "${as_builder[@]}" "$src_dir/installer/build-offline-repo.sh"

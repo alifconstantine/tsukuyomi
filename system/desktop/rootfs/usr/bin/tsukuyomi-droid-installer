@@ -2,6 +2,9 @@
 set -euo pipefail
 
 target="${1:-}"
+if [[ -n $target && -e $target ]]; then
+    target=$(realpath -- "$target")
+fi
 qml="/usr/share/tsukuyomi/compat/DroidInstaller.qml"
 if [[ ! -f $qml && -f "$HOME/.config/quickshell/compat/DroidInstaller.qml" ]]; then
     qml="$HOME/.config/quickshell/compat/DroidInstaller.qml"

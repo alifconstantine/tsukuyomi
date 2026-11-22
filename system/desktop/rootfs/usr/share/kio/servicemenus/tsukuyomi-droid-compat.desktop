@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Service
+MimeType=application/vnd.android.package-archive;application/vnd.tsukuyomi.xapk;application/vnd.tsukuyomi.apkm;
+Actions=DroidInstall;
+
+[Desktop Action DroidInstall]
+Name=Install Android App (DroidBridge)
+Icon=application-vnd.android.package-archive
+Exec=/usr/bin/tsukuyomi-droid-installer %f

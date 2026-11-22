@@ -80,10 +80,17 @@ if [[ -d "$shell_src/ryoku/compat" ]]; then
     cp -a "$shell_src/ryoku/compat/." "$payload/usr/share/tsukuyomi/compat/"
     cp -a "$shell_src/ryoku/tsukuyomi" "$payload/usr/share/tsukuyomi/compat/"
 fi
+if [[ ! -d "$root/repo/compat-apks" ]] || ! compgen -G "$root/repo/compat-apks/*.apk" >/dev/null; then
+    if [[ -x "$root/installer/fetch-compat-apks.sh" ]]; then
+        "$root/installer/fetch-compat-apks.sh" || echo "Warning: could not fetch compat APKs offline; continuing without pre-seeded store APKs." >&2
+    fi
+fi
 if [[ -d "$root/repo/compat-apks" ]] && compgen -G "$root/repo/compat-apks/*.apk" >/dev/null; then
     install -d "$payload/usr/share/tsukuyomi/compat/apks"
     cp -a "$root/repo/compat-apks/"*.apk "$payload/usr/share/tsukuyomi/compat/apks/"
 fi
+find "$payload/usr/lib/tsukuyomi" -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+find "$payload/usr/lib/tsukuyomi" -name '*.py[cod]' -delete 2>/dev/null || true
 find "$payload/usr/lib/tsukuyomi" "$payload/usr/bin" -maxdepth 1 -type f -exec chmod 0755 {} + 2>/dev/null || true
 install -Dm644 "$shell_src/ryoku/upstream/LICENSE" "$payload/usr/share/licenses/tsukuyomi-ryoku-desktop/LICENSE"
 install -Dm644 "$shell_src/ryoku/upstream/NOTICE" "$payload/usr/share/licenses/tsukuyomi-ryoku-desktop/NOTICE"
