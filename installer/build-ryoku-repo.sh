@@ -75,6 +75,11 @@ cp -a "$root/system/lockscreen" "$payload/usr/share/tsukuyomi/session-lockscreen
 ln -s /usr/share/tsukuyomi/session-lockscreen/theme-config.sh "$payload/usr/bin/tsukuyomi-lock-theme"
 ln -s session-lockscreen "$payload/usr/share/tsukuyomi/quickshell-lockscreen"
 cp -a "$root/system/desktop/rootfs/." "$payload/"
+if [[ -d "$shell_src/ryoku/compat" ]]; then
+    install -d "$payload/usr/share/tsukuyomi/compat"
+    cp -a "$shell_src/ryoku/compat/." "$payload/usr/share/tsukuyomi/compat/"
+    cp -a "$shell_src/ryoku/tsukuyomi" "$payload/usr/share/tsukuyomi/compat/"
+fi
 if [[ -d "$root/repo/compat-apks" ]] && compgen -G "$root/repo/compat-apks/*.apk" >/dev/null; then
     install -d "$payload/usr/share/tsukuyomi/compat/apks"
     cp -a "$root/repo/compat-apks/"*.apk "$payload/usr/share/tsukuyomi/compat/apks/"

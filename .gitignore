@@ -1,4 +1,6 @@
 *~
+__pycache__/
+*.py[cod]
 archiso-*.tar.gz*
 work/
 out/

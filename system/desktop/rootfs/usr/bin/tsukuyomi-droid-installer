@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+target="${1:-}"
+qml="/usr/share/tsukuyomi/compat/DroidInstaller.qml"
+if [[ ! -f $qml && -f "$HOME/.config/quickshell/compat/DroidInstaller.qml" ]]; then
+    qml="$HOME/.config/quickshell/compat/DroidInstaller.qml"
+fi
+
+export QML2_IMPORT_PATH="/usr/lib/qt6/qml:${HOME}/.local/lib/qt6/qml${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
+export QML_IMPORT_PATH="$QML2_IMPORT_PATH"
+export TSUKUYOMI_COMPAT_FILE="$target"
+
+exec quickshell -p "$qml"

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="isolated"
+target=""
+for arg in "$@"; do
+    case "$arg" in
+        --mode=*) mode="${arg#--mode=}" ;;
+        *) [[ -z $target ]] && target="$arg" ;;
+    esac
+done
+
+qml="/usr/share/tsukuyomi/compat/WinInstaller.qml"
+if [[ ! -f $qml && -f "$HOME/.config/quickshell/compat/WinInstaller.qml" ]]; then
+    qml="$HOME/.config/quickshell/compat/WinInstaller.qml"
+fi
+
+export QML2_IMPORT_PATH="/usr/lib/qt6/qml:${HOME}/.local/lib/qt6/qml${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
+export QML_IMPORT_PATH="$QML2_IMPORT_PATH"
+export TSUKUYOMI_COMPAT_FILE="$target"
+export TSUKUYOMI_COMPAT_MODE="$mode"
+
+exec quickshell -p "$qml"
