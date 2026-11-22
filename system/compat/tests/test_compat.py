@@ -189,9 +189,11 @@ class CompatTests(unittest.TestCase):
             (wd_icons / "org.fdroid.fdroid.png").write_bytes(b"\x89PNG\r\n\x1a\n1234")
 
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data_home)}):
-                with mock.patch("compat_common.refresh_desktop_caches"):
+                with mock.patch.object(tsukuyomi_droid, "refresh_desktop_caches") as refresh:
                     res = tsukuyomi_droid.sync_desktop()
                     self.assertTrue(res["ok"])
+                    tsukuyomi_droid.sync_desktop()
+                    refresh.assert_called_once()
 
             settings_txt = (apps_dir / "waydroid.com.android.settings.desktop").read_text(encoding="utf-8")
             fdroid_txt = (apps_dir / "waydroid.org.fdroid.fdroid.desktop").read_text(encoding="utf-8")

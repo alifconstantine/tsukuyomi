@@ -283,17 +283,30 @@ def _droid_failure(message: str) -> int:
     return 1
 
 
+def _fit_viewport(width: int, height: int) -> tuple[int, int]:
+    monitor = detect_hypr_monitor()
+    scale = max(1.0, float(monitor["scale"]))
+    factor = min(1.0, int(monitor["width"]) * 0.90 / (scale * width),
+                 int(monitor["height"]) * 0.86 / (scale * height))
+    return round(width * factor), round(height * factor)
+
+
+def _init_argv() -> list[str]:
+    gpu = detect_gpu_info()
+    argv = ["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init", "--gpu", str(gpu["mode"])]
+    if gpu.get("renderNode"):
+        argv.extend(["--drm-node", str(gpu["renderNode"])])
+    if gpu["mode"] == "swiftshader":
+        width, height = _fit_viewport(432, 768)
+        argv.extend(["--viewport", str(width), str(height)])
+    return argv
+
+
 def _ensure_container_ready() -> bool:
     if not _waydroid_initialized():
         if not _offline_images_present():
             raise ValueError("The bundled Android image is missing. Open Tsukuyomi Hub → Compatibility to set up Android.")
-        gpu = detect_gpu_info()
-        argv = [
-            "pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init",
-            "--gpu", str(gpu["mode"]), "--offline",
-        ]
-        if gpu.get("renderNode"):
-            argv.extend(["--drm-node", str(gpu["renderNode"])])
+        argv = _init_argv() + ["--offline"]
         init_res = run_cmd(argv, timeout=120)
         if init_res.returncode != 0:
             raise ValueError(_droid_error(init_res, "Could not set up Android. Unlock your session and try again."))
@@ -391,14 +404,17 @@ def _seed_default_stores_if_needed() -> None:
     seeded = True
     for apk_name, package in (("F-Droid.apk", "org.fdroid.fdroid"), ("AuroraStore.apk", "com.aurora.store")):
         apk = apks_src / apk_name
-        installed = run_cmd([PLATFORM, "installed", package], timeout=15)
-        if installed.returncode == 0:
-            continue
-        if not apk.is_file():
+        try:
+            installed = run_cmd([PLATFORM, "installed", package], timeout=15)
+            if installed.returncode == 0:
+                continue
+            if not apk.is_file():
+                seeded = False
+                continue
+            res = run_cmd([PLATFORM, "install", str(apk)], timeout=90)
+            seeded = seeded and res.returncode == 0
+        except subprocess.TimeoutExpired:
             seeded = False
-            continue
-        res = run_cmd([PLATFORM, "install", str(apk)], timeout=90)
-        seeded = seeded and res.returncode == 0
     if seeded:
         atomic_write_text(marker, "2\n")
 
@@ -428,6 +444,8 @@ def sync_desktop() -> dict[str, object]:
     apps_path = applications_dir()
     apps_path.mkdir(parents=True, exist_ok=True)
     synced: list[str] = []
+    desktop_changed = False
+    db_changed = False
 
     for desktop in sorted(apps_path.glob("waydroid.*.desktop")):
         pkg = desktop.stem.removeprefix("waydroid.")
@@ -450,11 +468,12 @@ def sync_desktop() -> dict[str, object]:
         for cand in icon_candidates:
             if cand.is_file() and cand.stat().st_size > 0:
                 dst = icons_hicolor_dir() / f"waydroid.{pkg}.png"
-                if cand != dst:
+                if cand != dst and (not dst.is_file() or cand.stat().st_mtime_ns > dst.stat().st_mtime_ns):
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     tmp = dst.with_suffix(".png.tmp")
                     shutil.copyfile(cand, tmp)
                     os.replace(tmp, dst)
+                    desktop_changed = True
                 icon_name = f"waydroid.{pkg}"
                 break
 
@@ -493,31 +512,38 @@ def sync_desktop() -> dict[str, object]:
             "Name=Uninstall Android App\n"
             f"Exec={act_uninst}\n"
         )
-        atomic_write_text(desktop, content)
+        try:
+            old_content = desktop.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        if old_content != content:
+            atomic_write_text(desktop, content)
+            desktop_changed = True
 
         if pkg not in db:
             db[pkg] = {
                 "package": pkg,
                 "name": name,
-                "mode": "phone",
+                "mode": cfg["defaultMode"],
                 "fakeTouch": False,
                 "system": pkg in SYSTEM_HIDE_PKGS,
             }
-        else:
+            db_changed = True
+        elif db[pkg].get("name") != name:
             db[pkg]["name"] = name
+            db_changed = True
         synced.append(pkg)
 
-    save_apps_db(db)
-    refresh_desktop_caches()
+    if db_changed:
+        save_apps_db(db)
+    if desktop_changed:
+        refresh_desktop_caches()
     return {"ok": True, "synced": synced}
 
 
 def cmd_init(args: argparse.Namespace) -> int:
     with droid_lock():
-        gpu = detect_gpu_info()
-        argv = ["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init", "--gpu", str(gpu["mode"])]
-        if gpu.get("renderNode"):
-            argv.extend(["--drm-node", str(gpu["renderNode"])])
+        argv = _init_argv()
         if args.offline or _offline_images_present():
             argv.append("--offline")
         if args.gapps:
@@ -581,15 +607,17 @@ def cmd_install(args: argparse.Namespace) -> int:
                 return _droid_failure(_droid_error(res, "Android rejected the package."))
 
         db = load_apps_db()
+        mode = args.mode or db.get(pkg, {}).get("mode") or load_config()["defaultMode"]
         db[pkg] = {
             "package": pkg,
             "name": str(meta.get("name") or pkg),
-            "mode": args.mode,
-            "fakeTouch": args.mode in ("landscape", "game-gamescope"),
+            "mode": mode,
+            "fakeTouch": mode in ("landscape", "game-gamescope"),
             "system": pkg in SYSTEM_HIDE_PKGS,
         }
         save_apps_db(db)
 
+        _seed_default_stores_if_needed()
         desktop = applications_dir() / f"waydroid.{pkg}.desktop"
         deadline = time.monotonic() + 5
         while not desktop.is_file() and time.monotonic() < deadline:
@@ -606,6 +634,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
     cfg = load_config()
     rec = db.get(pkg, {})
     mode = args.mode or str(rec.get("mode") or cfg.get("defaultMode") or "phone")
+    software = detect_gpu_info()["mode"] == "swiftshader"
 
     with droid_lock():
         if mode == "game-gamescope":
@@ -615,7 +644,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
                 w, h = int(w_str), int(h_str)
             except ValueError:
                 w, h = 1280, 720
-            if shutil.which("gamescope") and detect_gpu_info()["mode"] != "swiftshader":
+            if shutil.which("gamescope") and not software:
                 _ensure_container_ready()
                 # Stop host-bound session first so Waydroid binds to gamescope's WAYLAND_DISPLAY!
                 if _session_running():
@@ -638,20 +667,23 @@ def cmd_launch(args: argparse.Namespace) -> int:
                 except subprocess.TimeoutExpired:
                     return 0
                 return 1
-            else:
-                if not _ensure_container_and_session(multi_windows=False, width=w, height=h, fake_touch_pkg=pkg):
-                    return 1
-                _seed_default_stores_if_needed()
-                _adb_waydroid("shell", "wm", "user-rotation", "lock", "1", timeout=5, connect=False)
-                return run_cmd(["waydroid", "app", "launch", pkg], timeout=15).returncode
+            w, h = _fit_viewport(w, h)
+            if not _ensure_container_and_session(multi_windows=False, width=w, height=h, fake_touch_pkg=pkg):
+                return 1
+            return run_cmd(["waydroid", "app", "launch", pkg], timeout=20).returncode
 
-        # Daily Phone / Multi-Window or Landscape Multi-Window
-        w, h = (1280, 720) if mode == "landscape" else (0, 0)
+        # SwiftShader renders one bounded Android viewport. Forcing a desktop
+        # resize on individual multi-window surfaces leaves Android's original
+        # freeform task in a small subsurface inside the larger frame.
+        if mode == "landscape":
+            w, h = _fit_viewport(1280, 720)
+        elif software:
+            w, h = _fit_viewport(432, 768)
+        else:
+            w, h = 0, 0
         ft_pkg = pkg if (mode == "landscape" or rec.get("fakeTouch")) else ""
-        if not _ensure_container_and_session(multi_windows=True, width=w, height=h, fake_touch_pkg=ft_pkg):
+        if not _ensure_container_and_session(multi_windows=not software, width=w, height=h, fake_touch_pkg=ft_pkg):
             return 1
-        _adb_waydroid("shell", "wm", "user-rotation", "free", timeout=5, connect=False)
-        _seed_default_stores_if_needed()
         res = run_cmd(["waydroid", "app", "launch", pkg], timeout=20)
         return res.returncode
 
@@ -702,12 +734,7 @@ def cmd_resize(args: argparse.Namespace) -> int:
         return 0
 
     w, h, dpi = VIEWPORT_PRESETS[preset]
-    mon = detect_hypr_monitor()
-    max_w = int(int(mon["width"]) / float(mon["scale"]) * 0.90)
-    max_h = int(int(mon["height"]) / float(mon["scale"]) * 0.86)
-    factor = min(1.0, max_w / w, max_h / h)
-    win_w = round(w * factor)
-    win_h = round(h * factor)
+    win_w, win_h = _fit_viewport(w, h)
 
     resized = False
     if shutil.which("hyprctl"):
@@ -776,7 +803,7 @@ def main(argv: list[str]) -> int:
 
     p_inst = sub.add_parser("install")
     p_inst.add_argument("file")
-    p_inst.add_argument("--mode", choices=("phone", "landscape", "game-gamescope"), default="phone")
+    p_inst.add_argument("--mode", choices=("phone", "landscape", "game-gamescope"))
 
     p_launch = sub.add_parser("launch")
     p_launch.add_argument("package")
@@ -852,12 +879,13 @@ def main(argv: list[str]) -> int:
         return 0
     if args.cmd == "set-profile":
         pkg = validate_android_pkg(args.package)
-        db = load_apps_db()
-        rec = db.get(pkg, {"package": pkg, "name": pkg, "system": pkg in SYSTEM_HIDE_PKGS})
-        rec["mode"] = args.mode
-        rec["fakeTouch"] = args.mode in ("landscape", "game-gamescope")
-        db[pkg] = rec
-        save_apps_db(db)
+        with droid_lock():
+            db = load_apps_db()
+            rec = db.get(pkg, {"package": pkg, "name": pkg, "system": pkg in SYSTEM_HIDE_PKGS})
+            rec["mode"] = args.mode
+            rec["fakeTouch"] = args.mode in ("landscape", "game-gamescope")
+            db[pkg] = rec
+            save_apps_db(db)
         print(json.dumps({"ok": True, "app": rec}))
         return 0
     if args.cmd == "force-stop":
