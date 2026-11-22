@@ -1,0 +1,22 @@
+[Desktop Entry]
+Type=Service
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/vnd.microsoft.portable-executable;application/x-dosexec;application/x-msi;application/x-ms-shortcut;application/vnd.android.package-archive;application/vnd.tsukuyomi.xapk;application/vnd.tsukuyomi.apkm;
+Actions=WinInstall;WinPortable;DroidInstall;
+
+[Desktop Action WinInstall]
+Name=Install with Tsukuyomi WinBridge
+Icon=application-x-ms-dos-executable
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/vnd.microsoft.portable-executable;application/x-dosexec;application/x-msi;application/x-ms-shortcut;
+Exec=/usr/bin/tsukuyomi-win-installer %f
+
+[Desktop Action WinPortable]
+Name=Run Portable (Sandboxed)
+Icon=security-high
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/vnd.microsoft.portable-executable;application/x-dosexec;
+Exec=/usr/bin/tsukuyomi-win-installer --mode=portable %f
+
+[Desktop Action DroidInstall]
+Name=Install Android App (DroidBridge)
+Icon=application-vnd.android.package-archive
+MimeType=application/vnd.android.package-archive;application/vnd.tsukuyomi.xapk;application/vnd.tsukuyomi.apkm;
+Exec=/usr/bin/tsukuyomi-droid-installer %f

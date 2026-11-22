@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tsukuyomi Windows Installer
+Comment=Install or run Windows applications in an isolated prefix
+Exec=/usr/bin/tsukuyomi-win-installer %f
+Icon=application-x-ms-dos-executable
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/vnd.microsoft.portable-executable;application/x-dosexec;application/x-msi;application/x-ms-shortcut;
+Categories=System;Utility;

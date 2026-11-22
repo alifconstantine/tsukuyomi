@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Tsukuyomi Android Installer
+Comment=Install Android APK and split-APK bundles into Waydroid
+Exec=/usr/bin/tsukuyomi-droid-installer %f
+Icon=application-vnd.android.package-archive
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+MimeType=application/vnd.android.package-archive;application/vnd.tsukuyomi.xapk;application/vnd.tsukuyomi.apkm;
+Categories=System;Utility;

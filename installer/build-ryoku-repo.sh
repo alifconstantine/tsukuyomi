@@ -75,6 +75,11 @@ cp -a "$root/system/lockscreen" "$payload/usr/share/tsukuyomi/session-lockscreen
 ln -s /usr/share/tsukuyomi/session-lockscreen/theme-config.sh "$payload/usr/bin/tsukuyomi-lock-theme"
 ln -s session-lockscreen "$payload/usr/share/tsukuyomi/quickshell-lockscreen"
 cp -a "$root/system/desktop/rootfs/." "$payload/"
+if [[ -d "$root/repo/compat-apks" ]] && compgen -G "$root/repo/compat-apks/*.apk" >/dev/null; then
+    install -d "$payload/usr/share/tsukuyomi/compat/apks"
+    cp -a "$root/repo/compat-apks/"*.apk "$payload/usr/share/tsukuyomi/compat/apks/"
+fi
+find "$payload/usr/lib/tsukuyomi" "$payload/usr/bin" -maxdepth 1 -type f -exec chmod 0755 {} + 2>/dev/null || true
 install -Dm644 "$shell_src/ryoku/upstream/LICENSE" "$payload/usr/share/licenses/tsukuyomi-ryoku-desktop/LICENSE"
 install -Dm644 "$shell_src/ryoku/upstream/NOTICE" "$payload/usr/share/licenses/tsukuyomi-ryoku-desktop/NOTICE"
 install -m 644 "$root/system/desktop/autostart.lua" "$data/config/hypr/modules/autostart.lua"

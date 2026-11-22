@@ -1,0 +1,10 @@
+[Default Applications]
+application/x-ms-dos-executable=tsukuyomi-win-installer.desktop;
+application/x-msdownload=tsukuyomi-win-installer.desktop;
+application/vnd.microsoft.portable-executable=tsukuyomi-win-installer.desktop;
+application/x-dosexec=tsukuyomi-win-installer.desktop;
+application/x-msi=tsukuyomi-win-installer.desktop;
+application/x-ms-shortcut=tsukuyomi-win-installer.desktop;
+application/vnd.android.package-archive=tsukuyomi-droid-installer.desktop;
+application/vnd.tsukuyomi.xapk=tsukuyomi-droid-installer.desktop;
+application/vnd.tsukuyomi.apkm=tsukuyomi-droid-installer.desktop;
