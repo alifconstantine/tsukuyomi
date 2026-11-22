@@ -112,6 +112,13 @@ EOF
   # Point default web browser if one was selected
   tsukuyomi_set_default_browser "$user"
 
+  if chroot_has update-mime-database; then
+    run arch-chroot /mnt update-mime-database /usr/share/mime || true
+  fi
+  if chroot_has update-desktop-database; then
+    run arch-chroot /mnt update-desktop-database /usr/share/applications || true
+  fi
+
   if [[ ${TSUKUYOMI_FLATPAK:-false} == true ]]; then
     log "registering the Flathub system remote"
     if ! run arch-chroot /mnt flatpak remote-add --system --from --if-not-exists \
