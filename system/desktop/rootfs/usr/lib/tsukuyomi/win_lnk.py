@@ -46,8 +46,11 @@ def inspect_pe(exe_path: Path) -> dict[str, object]:
         pe.parse_data_directories(
             directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]]
         )
-        magic = pe.OPTIONAL_HEADER.Magic
-        info["arch"] = "x86_64" if magic == 0x20B else ("x86" if magic == 0x10B else "unknown")
+        info["arch"] = {
+            0x014C: "x86",
+            0x8664: "x86_64",
+            0xAA64: "arm64",
+        }.get(pe.FILE_HEADER.Machine, "unknown")
 
         meta: dict[str, str] = {}
         if hasattr(pe, "FileInfo"):
