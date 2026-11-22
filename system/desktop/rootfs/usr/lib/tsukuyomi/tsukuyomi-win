@@ -955,14 +955,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     dxvk = bool(rec.get("dxvk", True))
     sandbox = bool(rec.get("sandbox", True))
     runner = str(rec.get("runner") or "wine")
+    antigravity = exe.name.casefold() == "antigravity.exe"
 
     _ensure_prefix(
         slug, sandbox=sandbox, wayland=wayland, dxvk=dxvk,
-        hide_standalone_tray=exe.name.casefold() == "antigravity.exe",
+        hide_standalone_tray=antigravity,
     )
     env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, runner=runner)
 
     extra_args = shlex.split(str(rec.get("args") or ""))
+    # Electron's accelerated compositor can repaint only part of the window
+    # and leave its controls unresponsive on software-rendered XWayland.
+    if (antigravity and runner == "wine" and not wayland
+            and env.get("TSUKUYOMI_SOFTWARE_RENDERER") == "1"
+            and "--disable-gpu" not in extra_args and "--disable-gpu" not in args.extra_args):
+        extra_args.append("--disable-gpu")
     converted_user_args: list[str] = []
     ro_binds: list[tuple[Path, Path]] = []
     open_root = Path("/mnt/tsukuyomi-open")
