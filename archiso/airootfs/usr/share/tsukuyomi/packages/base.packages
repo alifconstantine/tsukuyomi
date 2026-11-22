@@ -87,5 +87,6 @@ lsof
 bind
 openssh
 rsync
+rclone
 github-cli
 wl-clipboard
