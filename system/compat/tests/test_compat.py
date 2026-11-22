@@ -228,6 +228,59 @@ class CompatTests(unittest.TestCase):
                     self.assertFalse(desktop.exists())
                     self.assertFalse(prefix.exists())
 
+    def test_exec_quoting_escapes_shell_metachars(self) -> None:
+        line = compat_common.format_desktop_exec(["/usr/bin/x", "a $(id) `id` b"])
+        self.assertIn('"a \\$(id) \\`id\\` b"', line)
+
+    def test_zip_bomb_limit_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            bomb = tmp_dir / "bomb.xapk"
+            with zipfile.ZipFile(bomb, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("base.apk", b"\x00" * (2 * 1024 * 1024))
+            with self.assertRaises(ValueError):
+                compat_common.safe_extract_zip(bomb, tmp_dir / "out", max_total_bytes=1024 * 1024)
+            self.assertFalse((tmp_dir / "out" / "base.apk").exists())
+
+    def test_apk_inspector_reports_corrupt_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "broken.apk"
+            bad.write_bytes(b"not a zip")
+            info = droid_apk.inspect_android_package(bad)
+            self.assertIn("error", info)
+            self.assertEqual(info["package"], "")
+
+    def test_bwrap_never_exposes_session_bus_or_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = Path(tmp) / "rt"
+            rt.mkdir()
+            (rt / "bus").write_text("", encoding="utf-8")
+            prefix = Path(tmp) / "pfx"
+            prefix.mkdir()
+            with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(rt), "XDG_DATA_HOME": str(Path(tmp) / "share")}):
+                with mock.patch.object(tsukuyomi_win.shutil, "which", return_value="/usr/bin/bwrap"):
+                    with mock.patch.object(tsukuyomi_win, "shared_dir", return_value=Path(tmp) / "shared"):
+                        argv = tsukuyomi_win._build_bwrap_argv(
+                            ["wine", "x.exe"], env={}, prefix=prefix,
+                            ro_binds=[(Path.home(), Path("/mnt/x"))], cwd=None,
+                        )
+            joined = " ".join(argv)
+            self.assertNotIn(str(rt / "bus"), joined)
+            self.assertNotIn(f"--ro-bind {Path.home()} /mnt/x", joined)
+            self.assertEqual(argv[-2:], ["wine", "x.exe"])
+
+    def test_portable_pin_refuses_download_folder_bundle(self) -> None:
+        self.assertFalse(tsukuyomi_win._is_safe_portable_bundle_dir(Path.home() / "Downloads"))
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = Path(tmp) / "MyPortableApp"
+            app_dir.mkdir()
+            (app_dir / "app.exe").write_bytes(b"MZ")
+            self.assertTrue(tsukuyomi_win._is_safe_portable_bundle_dir(app_dir))
+
+    def test_file_uri_decoding(self) -> None:
+        self.assertEqual(tsukuyomi_win._decode_uri_path("file:///home/u/My%20Setup.exe"), "/home/u/My Setup.exe")
+        self.assertEqual(tsukuyomi_win._decode_uri_path("/plain/path.exe"), "/plain/path.exe")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

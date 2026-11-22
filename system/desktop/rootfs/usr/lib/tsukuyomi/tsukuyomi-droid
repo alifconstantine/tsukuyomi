@@ -133,7 +133,7 @@ def droid_lock() -> Iterator[None]:
 
 
 def detect_gpu_info() -> dict[str, object]:
-    """Detect optimal GPU backend: prefer AMD/Intel Mesa on hybrid, else SwiftShader."""
+    """Detect optimal GPU backend: prefer AMD/Intel/VirtIO Mesa on hybrid, else SwiftShader."""
     sw_marker = False
     rt = os.environ.get("XDG_RUNTIME_DIR", "")
     sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
@@ -141,18 +141,26 @@ def detect_gpu_info() -> dict[str, object]:
         sw_marker = True
 
     vendors: list[str] = []
+    preferred_node = ""
     for dev in sorted(Path("/sys/class/drm").glob("renderD*/device/vendor")):
         try:
-            vendors.append(dev.read_text(encoding="utf-8").strip().lower())
+            v = dev.read_text(encoding="utf-8").strip().lower()
+            vendors.append(v)
+            if not preferred_node and v in ("0x1002", "0x8086", "0x1af4"):
+                node_name = dev.parent.parent.name
+                candidate = Path("/dev/dri") / node_name
+                if candidate.exists():
+                    preferred_node = str(candidate)
         except OSError:
             pass
 
-    has_mesa = any(v in ("0x1002", "0x8086") for v in vendors)
+    has_mesa = any(v in ("0x1002", "0x8086", "0x1af4") for v in vendors)
     has_nvidia = "0x10de" in vendors
     mode = "mesa" if (has_mesa and not sw_marker) else "swiftshader"
     return {
         "mode": mode,
         "vendors": vendors,
+        "renderNode": preferred_node if mode == "mesa" else "",
         "hybrid": has_mesa and has_nvidia,
         "softwareRenderer": sw_marker,
     }
@@ -230,15 +238,40 @@ def _notify(summary: str, body: str) -> None:
         run_cmd(["notify-send", "-a", "Tsukuyomi DroidBridge", summary, body], timeout=3)
 
 
-def _ensure_container_and_session(*, multi_windows: bool, width: int = 0, height: int = 0, fake_touch_pkg: str = "") -> bool:
+def _waydroid_ip() -> str:
+    if shutil.which("waydroid"):
+        res = run_cmd(["waydroid", "status"], timeout=5)
+        if res.returncode == 0:
+            m = re.search(r"IP address:\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", res.stdout)
+            if m:
+                return m.group(1)
+    return "192.168.240.112"
+
+
+def _adb_waydroid(*adb_args: str, timeout: int = 15) -> subprocess.CompletedProcess[str]:
+    """Run an adb command targeted strictly at Waydroid's IP:5555 (never touching USB phones)."""
+    if not shutil.which("adb"):
+        return subprocess.CompletedProcess(["adb", *adb_args], 127, "", "adb not found")
+    target = f"{_waydroid_ip()}:5555"
+    res = run_cmd(["adb", "-s", target, *adb_args], timeout=timeout)
+    if res.returncode != 0:
+        run_cmd(["adb", "connect", target], timeout=8)
+        res = run_cmd(["adb", "-s", target, *adb_args], timeout=timeout)
+    return res
+
+
+def _ensure_container_ready() -> bool:
     if not _waydroid_initialized():
         if not _offline_images_present():
             return False
-        gpu_mode = str(detect_gpu_info()["mode"])
-        init_res = run_cmd(
-            ["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init", "--gpu", gpu_mode, "--offline"],
-            timeout=120,
-        )
+        gpu = detect_gpu_info()
+        argv = [
+            "pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init",
+            "--gpu", str(gpu["mode"]), "--offline",
+        ]
+        if gpu.get("renderNode"):
+            argv.extend(["--drm-node", str(gpu["renderNode"])])
+        init_res = run_cmd(argv, timeout=120)
         if init_res.returncode != 0:
             return False
 
@@ -246,22 +279,47 @@ def _ensure_container_and_session(*, multi_windows: bool, width: int = 0, height
         res = run_cmd(["systemctl", "start", "waydroid-container.service"], timeout=15)
         if res.returncode != 0:
             return False
+    return True
+
+
+def _wait_for_session_boot(timeout_sec: float = 25.0) -> bool:
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if _session_running():
+            boot = run_cmd(["waydroid", "prop", "get", "sys.boot_completed"], timeout=3)
+            if boot.returncode == 0 and "1" in boot.stdout:
+                return True
+        time.sleep(0.75)
+    return _session_running()
+
+
+def _ensure_container_and_session(*, multi_windows: bool, width: int = 0, height: int = 0, fake_touch_pkg: str = "") -> bool:
+    if not _ensure_container_ready():
+        return False
+
+    # Waydroid prop get/set requires an active session; start session first if stopped.
+    if not _session_running():
+        _notify("Starting Android Subsystem", "Preparing Waydroid session...")
+        subprocess.Popen(["waydroid", "session", "start"], shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not _wait_for_session_boot(25.0):
+            return False
 
     desired_mw = "true" if multi_windows else "false"
+    desired_w = str(width) if width > 0 else ""
+    desired_h = str(height) if height > 0 else ""
+
     cur_mw_res = run_cmd(["waydroid", "prop", "get", "persist.waydroid.multi_windows"], timeout=4)
     cur_mw = "false" if (cur_mw_res.returncode == 0 and "false" in cur_mw_res.stdout.lower()) else "true"
+    cur_w_res = run_cmd(["waydroid", "prop", "get", "persist.waydroid.width"], timeout=4)
+    cur_h_res = run_cmd(["waydroid", "prop", "get", "persist.waydroid.height"], timeout=4)
+    cur_w = "" if "not set" in cur_w_res.stdout.lower() else cur_w_res.stdout.strip()
+    cur_h = "" if "not set" in cur_h_res.stdout.lower() else cur_h_res.stdout.strip()
 
-    need_restart = False
-    if _session_running() and cur_mw != desired_mw:
-        need_restart = True
+    need_restart = (cur_mw != desired_mw) or (cur_w != desired_w) or (cur_h != desired_h)
 
     run_cmd(["waydroid", "prop", "set", "persist.waydroid.multi_windows", desired_mw], timeout=5)
-    if width > 0 and height > 0:
-        run_cmd(["waydroid", "prop", "set", "persist.waydroid.width", str(width)], timeout=5)
-        run_cmd(["waydroid", "prop", "set", "persist.waydroid.height", str(height)], timeout=5)
-    else:
-        run_cmd(["waydroid", "prop", "set", "persist.waydroid.width", ""], timeout=5)
-        run_cmd(["waydroid", "prop", "set", "persist.waydroid.height", ""], timeout=5)
+    run_cmd(["waydroid", "prop", "set", "persist.waydroid.width", desired_w], timeout=5)
+    run_cmd(["waydroid", "prop", "set", "persist.waydroid.height", desired_h], timeout=5)
 
     if fake_touch_pkg:
         validate_android_pkg(fake_touch_pkg)
@@ -274,17 +332,8 @@ def _ensure_container_and_session(*, multi_windows: bool, width: int = 0, height
         _notify("Switching Android Mode", "Restarting container for requested display layout...")
         run_cmd(["waydroid", "session", "stop"], timeout=15)
         time.sleep(1)
-
-    if not _session_running():
-        _notify("Starting Android Subsystem", "Preparing Waydroid session...")
         subprocess.Popen(["waydroid", "session", "start"], shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.time() + 25.0
-        while time.time() < deadline:
-            if _session_running():
-                boot = run_cmd(["waydroid", "prop", "get", "sys.boot_completed"], timeout=3)
-                if boot.returncode == 0 and "1" in boot.stdout:
-                    break
-            time.sleep(0.75)
+        return _wait_for_session_boot(25.0)
 
     return _session_running()
 
@@ -421,8 +470,10 @@ def sync_desktop() -> dict[str, object]:
 
 def cmd_init(args: argparse.Namespace) -> int:
     with droid_lock():
-        gpu_mode = str(detect_gpu_info()["mode"])
-        argv = ["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init", "--gpu", gpu_mode]
+        gpu = detect_gpu_info()
+        argv = ["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init", "--gpu", str(gpu["mode"])]
+        if gpu.get("renderNode"):
+            argv.extend(["--drm-node", str(gpu["renderNode"])])
         if args.offline or _offline_images_present():
             argv.append("--offline")
         if args.gapps:
@@ -447,6 +498,9 @@ def cmd_install(args: argparse.Namespace) -> int:
         return 1
 
     meta = inspect_android_package(src)
+    if meta.get("error"):
+        print(json.dumps({"ok": False, "error": str(meta["error"])}))
+        return 1
     pkg = str(meta.get("package") or "")
 
     with droid_lock():
@@ -458,16 +512,16 @@ def cmd_install(args: argparse.Namespace) -> int:
         if src.suffix.lower() in (".xapk", ".apkm"):
             with tempfile.TemporaryDirectory(prefix="tsukuyomi-xapk-inst-") as tmp:
                 tmp_dir = Path(tmp)
-                extracted = safe_extract_zip(src, tmp_dir, allowed_exts={".apk", ".json"})
+                try:
+                    extracted = safe_extract_zip(src, tmp_dir, allowed_exts={".apk", ".json"})
+                except (ValueError, OSError) as exc:
+                    print(json.dumps({"ok": False, "error": str(exc)}))
+                    return 1
                 apks = sorted(str(p) for p in extracted if p.suffix.lower() == ".apk")
                 if not apks:
                     print(json.dumps({"ok": False, "error": "No APK payloads found in bundle"}))
                     return 1
-                res = run_cmd(["adb", "install-multiple", "-r", *apks], timeout=180)
-                if res.returncode != 0:
-                    # Fallback if adb wasn't connected yet
-                    run_cmd(["adb", "connect", "192.168.240.112:5555"], timeout=10)
-                    res = run_cmd(["adb", "install-multiple", "-r", *apks], timeout=180)
+                res = _adb_waydroid("install-multiple", "-r", *apks, timeout=180)
         else:
             res = run_cmd(["waydroid", "app", "install", str(src)], timeout=180)
 
@@ -500,7 +554,6 @@ def cmd_launch(args: argparse.Namespace) -> int:
     mode = args.mode or str(rec.get("mode") or cfg.get("defaultMode") or "phone")
 
     with droid_lock():
-        _seed_default_stores_if_needed()
         if mode == "game-gamescope":
             res_str = str(cfg.get("gameResolution") or "1280x720")
             try:
@@ -508,23 +561,31 @@ def cmd_launch(args: argparse.Namespace) -> int:
                 w, h = int(w_str), int(h_str)
             except ValueError:
                 w, h = 1280, 720
-            if not _ensure_container_and_session(multi_windows=False, width=w, height=h, fake_touch_pkg=pkg):
-                return 1
             if shutil.which("gamescope"):
+                if not _ensure_container_ready():
+                    return 1
+                # Stop host-bound session first so Waydroid binds to gamescope's WAYLAND_DISPLAY!
+                if _session_running():
+                    run_cmd(["waydroid", "session", "stop"], timeout=15)
+                    time.sleep(1)
+                _notify("Launching Android Game Mode", f"Starting {rec.get('name') or pkg} in Gamescope ({w}x{h})")
                 subprocess.Popen(
                     [
                         "gamescope", "--expose-wayland",
                         "-w", str(w), "-h", str(h),
                         "-W", str(w), "-H", str(h),
                         "-S", "fit", "--",
-                        "/usr/lib/tsukuyomi/droid-gamescope-entry", pkg,
+                        "/usr/lib/tsukuyomi/droid-gamescope-entry", pkg, str(w), str(h),
                     ],
                     shell=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
             else:
-                run_cmd(["waydroid", "shell", "wm", "user-rotation", "lock", "1"], timeout=5)
+                if not _ensure_container_and_session(multi_windows=False, width=w, height=h, fake_touch_pkg=pkg):
+                    return 1
+                _seed_default_stores_if_needed()
+                _adb_waydroid("shell", "wm", "user-rotation", "lock", "1", timeout=5)
                 run_cmd(["waydroid", "app", "launch", pkg], timeout=15)
                 subprocess.Popen(["waydroid", "show-full-ui"], shell=False)
             return 0
@@ -534,6 +595,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
         ft_pkg = pkg if (mode == "landscape" or rec.get("fakeTouch")) else ""
         if not _ensure_container_and_session(multi_windows=True, width=w, height=h, fake_touch_pkg=ft_pkg):
             return 1
+        _seed_default_stores_if_needed()
         res = run_cmd(["waydroid", "app", "launch", pkg], timeout=20)
         return res.returncode
 
@@ -541,8 +603,8 @@ def cmd_launch(args: argparse.Namespace) -> int:
 def cmd_resize(args: argparse.Namespace) -> int:
     preset = args.preset
     if preset == "reset":
-        run_cmd(["waydroid", "shell", "wm", "size", "reset"], timeout=5)
-        run_cmd(["waydroid", "shell", "wm", "density", "reset"], timeout=5)
+        _adb_waydroid("shell", "wm", "size", "reset", timeout=5)
+        _adb_waydroid("shell", "wm", "density", "reset", timeout=5)
         print(json.dumps({"ok": True, "preset": "reset"}))
         return 0
 
@@ -553,16 +615,16 @@ def cmd_resize(args: argparse.Namespace) -> int:
     win_w = min(w, max_w)
     win_h = min(h, max_h)
 
-    run_cmd(["waydroid", "shell", "wm", "size", f"{w}x{h}"], timeout=5)
-    run_cmd(["waydroid", "shell", "wm", "density", str(dpi)], timeout=5)
+    _adb_waydroid("shell", "wm", "size", f"{w}x{h}", timeout=5)
+    _adb_waydroid("shell", "wm", "density", str(dpi), timeout=5)
 
     if shutil.which("hyprctl"):
         clients = run_cmd(["hyprctl", "clients", "-j"], timeout=3)
         if clients.returncode == 0:
             try:
                 for cl in json.loads(clients.stdout):
-                    cls = str(cl.get("class") or "")
-                    if cls.startswith("waydroid.") or cls == "Waydroid":
+                    cls = str(cl.get("class") or "").lower()
+                    if cls.startswith("waydroid.") or cls == "waydroid":
                         addr = str(cl.get("address") or "")
                         if addr:
                             run_cmd(["hyprctl", "dispatch", "resizewindowpixel", f"exact {win_w} {win_h},address:{addr}"], timeout=3)
@@ -649,8 +711,8 @@ def main(argv: list[str]) -> int:
         return 0
     if args.cmd == "inspect":
         src = Path(args.file).expanduser().resolve()
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-            icon_tmp = Path(tf.name)
+        icon_tmp = xdg_runtime_dir() / "tsukuyomi-droid-preview.png"
+        icon_tmp.unlink(missing_ok=True)
         info = inspect_android_package(src, icon_tmp)
         if not info.get("icon_extracted"):
             icon_tmp.unlink(missing_ok=True)
@@ -694,13 +756,13 @@ def main(argv: list[str]) -> int:
         return 0
     if args.cmd == "force-stop":
         pkg = validate_android_pkg(args.package)
-        res = run_cmd(["waydroid", "shell", "am", "force-stop", pkg], timeout=10)
+        res = _adb_waydroid("shell", "am", "force-stop", pkg, timeout=10)
         return res.returncode
     if args.cmd == "uninstall":
         return cmd_uninstall(args)
     if args.cmd == "setup-addon":
-        res = run_cmd(["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "addon", args.addon], timeout=600)
-        print(json.dumps({"ok": res.returncode == 0, "stdout": res.stdout, "stderr": res.stderr}))
+        # Stream live output so interactive terminal shows progress clearly.
+        res = subprocess.run(["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "addon", args.addon], shell=False)
         return res.returncode
     if args.cmd == "set-config":
         cfg = load_config()

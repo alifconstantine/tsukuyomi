@@ -14,10 +14,15 @@ from pathlib import Path
 from typing import Optional
 
 USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+DRM_NODE_RE = re.compile(r"^/dev/dri/renderD[0-9]+$")
 WAYDROID_CFG = Path("/var/lib/waydroid/waydroid.cfg")
+FSTAB_PATH = Path("/etc/fstab")
 
 
-def run_cmd(argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+def run_cmd(argv: list[str], *, check: bool = False, stream: bool = False) -> subprocess.CompletedProcess[str]:
+    if stream:
+        res = subprocess.run(argv, shell=False, text=True, check=check)
+        return subprocess.CompletedProcess(argv, res.returncode, "", "")
     return subprocess.run(argv, shell=False, text=True, capture_output=True, check=check)
 
 
@@ -28,27 +33,28 @@ def _find_offline_images() -> Optional[Path]:
     return None
 
 
-def _update_cfg_properties(updates: dict[str, str]) -> None:
-    if not WAYDROID_CFG.is_file():
+def _update_cfg_section(section: str, updates: dict[str, str]) -> None:
+    if not WAYDROID_CFG.is_file() or not updates:
         return
     lines = WAYDROID_CFG.read_text(encoding="utf-8").splitlines()
     out: list[str] = []
-    in_props = False
+    target_hdr = f"[{section.lower()}]"
+    in_sec = False
     applied: set[str] = set()
 
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
-            if in_props:
+            if in_sec:
                 for k, v in updates.items():
                     if k not in applied:
                         out.append(f"{k} = {v}")
                         applied.add(k)
-            in_props = stripped.lower() == "[properties]"
+            in_sec = stripped.lower() == target_hdr
             out.append(line)
             continue
 
-        if in_props and "=" in line and not stripped.startswith("#"):
+        if in_sec and "=" in line and not stripped.startswith("#"):
             key = line.split("=", 1)[0].strip()
             if key in updates:
                 out.append(f"{key} = {updates[key]}")
@@ -56,14 +62,14 @@ def _update_cfg_properties(updates: dict[str, str]) -> None:
                 continue
         out.append(line)
 
-    if in_props:
+    if in_sec:
         for k, v in updates.items():
             if k not in applied:
                 out.append(f"{k} = {v}")
                 applied.add(k)
     elif len(applied) < len(updates):
         out.append("")
-        out.append("[properties]")
+        out.append(f"[{section}]")
         for k, v in updates.items():
             if k not in applied:
                 out.append(f"{k} = {v}")
@@ -78,8 +84,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         return 1
 
     if not WAYDROID_CFG.is_file() or args.force:
-        if img_dir:
-            res = run_cmd(["waydroid", "init", "-f"])
+        if img_dir and not args.gapps:
+            res = run_cmd(["waydroid", "init", "-f", "-i", str(img_dir)])
         elif args.gapps:
             res = run_cmd(["waydroid", "init", "-s", "GAPPS", "-f"])
         else:
@@ -99,7 +105,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         props["ro.hardware.gralloc"] = "gbm"
         props["ro.hardware.egl"] = "mesa"
 
-    _update_cfg_properties(props)
+    _update_cfg_section("properties", props)
+    if args.drm_node and DRM_NODE_RE.match(args.drm_node) and Path(args.drm_node).exists():
+        _update_cfg_section("waydroid", {"drm_device": args.drm_node})
+
     run_cmd(["waydroid", "upgrade", "--offline"])
     run_cmd(["systemctl", "enable", "waydroid-container.service"])
     run_cmd(["systemctl", "restart", "waydroid-container.service"])
@@ -108,21 +117,26 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_addon(args: argparse.Namespace) -> int:
     addon = args.addon
-    if addon == "gapps":
-        run_cmd(["systemctl", "stop", "waydroid-container.service"])
-        res = run_cmd(["waydroid", "init", "-s", "GAPPS", "-f"])
-        run_cmd(["systemctl", "start", "waydroid-container.service"])
-        sys.stdout.write(res.stdout)
-        sys.stderr.write(res.stderr)
-        return res.returncode
+    if addon not in ("libndk", "libhoudini", "gapps"):
+        return 1
 
-    if addon in ("libndk", "libhoudini"):
-        run_cmd(["systemctl", "stop", "waydroid-container.service"])
+    if not WAYDROID_CFG.is_file():
+        print("Initializing Waydroid offline first...", flush=True)
+        init_ns = argparse.Namespace(gpu="mesa", offline=True, gapps=False, force=False, drm_node="")
+        if cmd_init(init_ns) != 0:
+            return 1
+
+    print(f"Stopping waydroid-container before installing {addon}...", flush=True)
+    run_cmd(["systemctl", "stop", "waydroid-container.service"])
+    try:
         with tempfile.TemporaryDirectory(prefix="tsukuyomi-wd-addon-") as tmp:
             repo_dir = Path(tmp) / "waydroid_script"
-            clone = run_cmd(["git", "clone", "--depth", "1", "https://github.com/casualsnek/waydroid_script.git", str(repo_dir)])
+            print("Cloning casualsnek/waydroid_script...", flush=True)
+            clone = run_cmd(
+                ["git", "clone", "--depth", "1", "https://github.com/casualsnek/waydroid_script.git", str(repo_dir)],
+                stream=True,
+            )
             if clone.returncode != 0:
-                sys.stderr.write(clone.stderr or clone.stdout)
                 return 1
             venv_dir = Path(tmp) / "venv"
             run_cmd([sys.executable, "-m", "venv", str(venv_dir)], check=True)
@@ -130,17 +144,30 @@ def cmd_addon(args: argparse.Namespace) -> int:
             py_bin = str(venv_dir / "bin" / "python")
             req = repo_dir / "requirements.txt"
             if req.is_file():
-                pip_res = run_cmd([pip_bin, "install", "--quiet", "-r", str(req)])
+                print("Installing waydroid_script Python dependencies...", flush=True)
+                pip_res = run_cmd([pip_bin, "install", "--quiet", "-r", str(req)], stream=True)
                 if pip_res.returncode != 0:
-                    sys.stderr.write(pip_res.stderr or pip_res.stdout)
                     return 1
-            inst = run_cmd([py_bin, str(repo_dir / "main.py"), "install", addon])
-            sys.stdout.write(inst.stdout)
-            sys.stderr.write(inst.stderr)
-            run_cmd(["systemctl", "start", "waydroid-container.service"])
+            print(f"Running waydroid_script -a 13 install {addon}...", flush=True)
+            inst = run_cmd([py_bin, str(repo_dir / "main.py"), "-a", "13", "install", addon], stream=True)
             return inst.returncode
+    finally:
+        run_cmd(["systemctl", "start", "waydroid-container.service"])
 
-    return 1
+
+def _update_fstab_bind(user: str, host_dl: Path, droid_dl: Path, enable: bool) -> None:
+    if not FSTAB_PATH.is_file():
+        return
+    tag = f"# tsukuyomi-droid-shared-{user}"
+    lines = FSTAB_PATH.read_text(encoding="utf-8").splitlines()
+    filtered = [ln for ln in lines if tag not in ln]
+    if enable:
+        entry = (
+            f"{host_dl} {droid_dl} none "
+            f"bind,nofail,x-systemd.requires-mounts-for=/home/{user} 0 0 {tag}"
+        )
+        filtered.append(entry)
+    FSTAB_PATH.write_text("\n".join(filtered) + "\n", encoding="utf-8")
 
 
 def cmd_bind_shared(args: argparse.Namespace) -> int:
@@ -154,11 +181,13 @@ def cmd_bind_shared(args: argparse.Namespace) -> int:
         return 1
     droid_dl = home / ".local" / "share" / "waydroid" / "data" / "media" / "0" / "Download"
     droid_dl.mkdir(parents=True, exist_ok=True)
-    # Apply tight POSIX ACL on Downloads so both host user and Android container UIDs can share files safely.
+    # Grant tight POSIX ACL to Android media_rw (UID 1023) + host user UID so both can read/write cleanly.
     if shutil.which("setfacl"):
-        run_cmd(["setfacl", "-R", "-m", f"u:{args.uid}:rwx", str(host_dl)])
-        run_cmd(["setfacl", "-R", "-d", "-m", f"u:{args.uid}:rwx", str(host_dl)])
-    if args.enable == "true":
+        acl_spec = f"u:1023:rwx,u:{args.uid}:rwx"
+        run_cmd(["setfacl", "-R", "-m", acl_spec, str(host_dl)])
+        run_cmd(["setfacl", "-R", "-d", "-m", acl_spec, str(host_dl)])
+    enable = args.enable == "true"
+    if enable:
         mounted = run_cmd(["mountpoint", "-q", str(droid_dl)]).returncode == 0
         if not mounted:
             res = run_cmd(["mount", "--bind", str(host_dl), str(droid_dl)])
@@ -168,6 +197,7 @@ def cmd_bind_shared(args: argparse.Namespace) -> int:
     else:
         if run_cmd(["mountpoint", "-q", str(droid_dl)]).returncode == 0:
             run_cmd(["umount", str(droid_dl)])
+    _update_fstab_bind(user, host_dl, droid_dl, enable)
     return 0
 
 
@@ -177,6 +207,7 @@ def main(argv: list[str]) -> int:
 
     p_init = sub.add_parser("init")
     p_init.add_argument("--gpu", choices=("mesa", "swiftshader"), default="mesa")
+    p_init.add_argument("--drm-node", default="")
     p_init.add_argument("--offline", action="store_true")
     p_init.add_argument("--gapps", action="store_true")
     p_init.add_argument("--force", action="store_true")

@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Lightweight user session watcher that keeps Waydroid .desktop entries synced."""
+"""Lightweight user session watcher that keeps Waydroid .desktop entries and icons synced."""
 
 from __future__ import annotations
 
-import os
 import signal
 import subprocess
 import time
-from pathlib import Path
 
 from compat_common import xdg_data_home
 
@@ -19,41 +17,50 @@ def _stop(_sig: int, _frame: object) -> None:
     RUNNING = False
 
 
-def _snapshot() -> dict[str, int]:
+def _needs_sync() -> dict[str, int]:
     apps_dir = xdg_data_home() / "applications"
     icons_dir = xdg_data_home() / "waydroid" / "data" / "icons"
-    snap: dict[str, int] = {}
-    for folder, pat in ((apps_dir, "waydroid.*.desktop"), (icons_dir, "*.png")):
-        if folder.is_dir():
-            for p in folder.glob(pat):
-                try:
-                    snap[str(p)] = p.stat().st_mtime_ns
-                except OSError:
-                    pass
-    return snap
+    hicolor_dir = xdg_data_home() / "icons" / "hicolor" / "256x256" / "apps"
+    pending: dict[str, int] = {}
+
+    if apps_dir.is_dir():
+        for p in apps_dir.glob("waydroid.*.desktop"):
+            try:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+                if "X-Tsukuyomi-Runtime=android" not in text:
+                    pending[str(p)] = p.stat().st_mtime_ns
+            except OSError:
+                pass
+
+    if icons_dir.is_dir():
+        for icon in icons_dir.glob("*.png"):
+            try:
+                pkg = icon.stem
+                if not (apps_dir / f"waydroid.{pkg}.desktop").is_file():
+                    continue
+                target = hicolor_dir / f"waydroid.{pkg}.png"
+                src_mtime = icon.stat().st_mtime_ns
+                if not target.is_file() or target.stat().st_mtime_ns < src_mtime:
+                    pending[str(icon)] = src_mtime
+            except OSError:
+                pass
+
+    return pending
 
 
 def main() -> int:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
-    last_raw: dict[str, int] = {}
+    last_pending: dict[str, int] = {}
     while RUNNING:
-        apps_dir = xdg_data_home() / "applications"
-        raw_apps: dict[str, int] = {}
-        if apps_dir.is_dir():
-            for p in apps_dir.glob("waydroid.*.desktop"):
-                try:
-                    text = p.read_text(encoding="utf-8", errors="ignore")
-                    if "X-Tsukuyomi-Runtime=android" not in text:
-                        raw_apps[str(p)] = p.stat().st_mtime_ns
-                except OSError:
-                    pass
-
-        if raw_apps and raw_apps != last_raw:
+        pending = _needs_sync()
+        if pending and pending != last_pending:
             time.sleep(0.8)
             subprocess.run(["/usr/lib/tsukuyomi/tsukuyomi-droid", "sync-desktop"], shell=False, capture_output=True)
-            last_raw = _snapshot()
+            last_pending = _needs_sync()
+        elif not pending:
+            last_pending = {}
 
         time.sleep(2.0)
     return 0

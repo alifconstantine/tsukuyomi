@@ -166,78 +166,84 @@ def inspect_android_package(pkg_path: Path, icon_out: Optional[Path] = None) -> 
     }
 
     if not pkg_path.is_file():
+        info["error"] = f"File not found: {pkg_path}"
         return info
 
-    if suffix == ".apk":
-        with zipfile.ZipFile(pkg_path, "r") as zf:
-            if "AndroidManifest.xml" in zf.namelist():
-                parsed = _parse_axml_manifest(zf.read("AndroidManifest.xml"))
-                info["package"] = parsed.get("package", "")
-                info["version_name"] = parsed.get("version_name", "")
-                info["version_code"] = parsed.get("version_code", "")
-                if parsed.get("label"):
-                    info["name"] = parsed["label"]
-            abis = sorted(
-                {
-                    parts[1]
-                    for n in zf.namelist()
-                    for parts in [Path(n).parts]
-                    if len(parts) >= 3 and parts[0] == "lib"
-                }
-            )
-            info["abis"] = abis
-            if icon_out:
-                icon_bytes = _pick_best_apk_icon(zf, str(parsed.get("icon", "") if "AndroidManifest.xml" in zf.namelist() else ""))
-                if icon_bytes:
+    try:
+        if suffix == ".apk":
+            with zipfile.ZipFile(pkg_path, "r") as zf:
+                parsed: dict[str, object] = {}
+                if "AndroidManifest.xml" in zf.namelist():
+                    parsed = _parse_axml_manifest(zf.read("AndroidManifest.xml"))
+                    info["package"] = parsed.get("package", "")
+                    info["version_name"] = parsed.get("version_name", "")
+                    info["version_code"] = parsed.get("version_code", "")
+                    if parsed.get("label"):
+                        info["name"] = parsed["label"]
+                abis = sorted(
+                    {
+                        parts[1]
+                        for n in zf.namelist()
+                        for parts in [Path(n).parts]
+                        if len(parts) >= 3 and parts[0] == "lib"
+                    }
+                )
+                info["abis"] = abis
+                if icon_out:
+                    icon_bytes = _pick_best_apk_icon(zf, str(parsed.get("icon", "")))
+                    if icon_bytes:
+                        icon_out.parent.mkdir(parents=True, exist_ok=True)
+                        icon_out.write_bytes(icon_bytes)
+                        info["icon_extracted"] = True
+        else:
+            with tempfile.TemporaryDirectory(prefix="tsukuyomi-xapk-") as tmp:
+                tmp_dir = Path(tmp)
+                extracted = safe_extract_zip(pkg_path, tmp_dir, allowed_exts={".apk", ".json", ".png"})
+                manifest_json = tmp_dir / "manifest.json"
+                info_json = tmp_dir / "info.json"
+                meta = None
+                for candidate in (manifest_json, info_json):
+                    if candidate.is_file():
+                        try:
+                            meta = json.loads(candidate.read_text(encoding="utf-8"))
+                            break
+                        except (OSError, json.JSONDecodeError):
+                            pass
+                if isinstance(meta, dict):
+                    pkg_name = sanitize_desktop_value(str(meta.get("package_name") or meta.get("pname") or ""))
+                    app_name = sanitize_desktop_value(str(meta.get("name") or meta.get("app_name") or ""))
+                    if pkg_name:
+                        info["package"] = pkg_name
+                    if app_name:
+                        info["name"] = app_name
+                    info["version_name"] = sanitize_desktop_value(str(meta.get("version_name") or meta.get("release_version") or ""))
+                    info["version_code"] = sanitize_desktop_value(str(meta.get("version_code") or ""))
+
+                # Inspect base/all split APKs for ABIs and icon fallback
+                abis_set: set[str] = set()
+                apks = [p for p in extracted if p.suffix.lower() == ".apk"]
+                for apk in apks:
+                    sub = inspect_android_package(apk, icon_out if not info["icon_extracted"] else None)
+                    if not info["package"] and sub.get("package"):
+                        info["package"] = sub["package"]
+                    if info["name"] == pkg_path.stem and sub.get("name") and sub["name"] != apk.stem:
+                        info["name"] = sub["name"]
+                    if not info["version_name"] and sub.get("version_name"):
+                        info["version_name"] = sub["version_name"]
+                    if sub.get("icon_extracted"):
+                        info["icon_extracted"] = True
+                    for abi in sub.get("abis", []):
+                        abis_set.add(abi)
+
+                if not info["icon_extracted"] and icon_out and (tmp_dir / "icon.png").is_file():
                     icon_out.parent.mkdir(parents=True, exist_ok=True)
-                    icon_out.write_bytes(icon_bytes)
+                    icon_out.write_bytes((tmp_dir / "icon.png").read_bytes())
                     info["icon_extracted"] = True
-    else:
-        with tempfile.TemporaryDirectory(prefix="tsukuyomi-xapk-") as tmp:
-            tmp_dir = Path(tmp)
-            extracted = safe_extract_zip(pkg_path, tmp_dir, allowed_exts={".apk", ".json", ".png"})
-            manifest_json = tmp_dir / "manifest.json"
-            info_json = tmp_dir / "info.json"
-            meta = None
-            for candidate in (manifest_json, info_json):
-                if candidate.is_file():
-                    try:
-                        meta = json.loads(candidate.read_text(encoding="utf-8"))
-                        break
-                    except (OSError, json.JSONDecodeError):
-                        pass
-            if isinstance(meta, dict):
-                pkg_name = sanitize_desktop_value(str(meta.get("package_name") or meta.get("pname") or ""))
-                app_name = sanitize_desktop_value(str(meta.get("name") or meta.get("app_name") or ""))
-                if pkg_name:
-                    info["package"] = pkg_name
-                if app_name:
-                    info["name"] = app_name
-                info["version_name"] = sanitize_desktop_value(str(meta.get("version_name") or meta.get("release_version") or ""))
-                info["version_code"] = sanitize_desktop_value(str(meta.get("version_code") or ""))
 
-            # Inspect base/all split APKs for ABIs and icon fallback
-            abis_set: set[str] = set()
-            apks = [p for p in extracted if p.suffix.lower() == ".apk"]
-            for apk in apks:
-                sub = inspect_android_package(apk, icon_out if not info["icon_extracted"] else None)
-                if not info["package"] and sub.get("package"):
-                    info["package"] = sub["package"]
-                if info["name"] == pkg_path.stem and sub.get("name") and sub["name"] != apk.stem:
-                    info["name"] = sub["name"]
-                if not info["version_name"] and sub.get("version_name"):
-                    info["version_name"] = sub["version_name"]
-                if sub.get("icon_extracted"):
-                    info["icon_extracted"] = True
-                for abi in sub.get("abis", []):
-                    abis_set.add(abi)
-
-            if not info["icon_extracted"] and icon_out and (tmp_dir / "icon.png").is_file():
-                icon_out.parent.mkdir(parents=True, exist_ok=True)
-                icon_out.write_bytes((tmp_dir / "icon.png").read_bytes())
-                info["icon_extracted"] = True
-
-            info["abis"] = sorted(abis_set)
+                info["abis"] = sorted(abis_set)
+    except (zipfile.BadZipFile, ValueError, OSError) as exc:
+        info["error"] = str(exc)
+        return info
 
     abis_list = info["abis"]
     if isinstance(abis_list, list) and abis_list:

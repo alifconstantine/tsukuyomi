@@ -65,8 +65,9 @@ def format_desktop_exec(argv: Iterable[str]) -> str:
         if not s:
             continue
         # Escape desktop field codes and special quoting characters per XDG spec.
-        s = s.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
-        if any(c in s for c in (' ', '\t', '\n', '"', "'", '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(', ')', '`')):
+        needs_quote = any(c in s for c in (' ', '\t', '\n', '"', "'", '\\', '>', '<', '~', '|', '&', ';', '$', '*', '?', '#', '(', ')', '`'))
+        s = s.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`").replace("%", "%%")
+        if needs_quote:
             parts.append(f'"{s}"')
         else:
             parts.append(s)
@@ -135,13 +136,21 @@ def safe_extract_zip(
             if os.path.commonpath([dest_root, str(target)]) != dest_root:
                 raise ValueError(f"Archive path escapes destination: {info.filename}")
 
-            total_written += info.file_size
-            if total_written > max_total_bytes:
+            if total_written + info.file_size > max_total_bytes:
                 raise ValueError("Archive exceeds maximum safe extracted size")
 
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info, "r") as src, open(target, "wb") as dst:
-                shutil.copyfileobj(src, dst, length=1024 * 1024)
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total_written += len(chunk)
+                    if total_written > max_total_bytes:
+                        dst.close()
+                        target.unlink(missing_ok=True)
+                        raise ValueError("Archive exceeds maximum safe extracted size")
+                    dst.write(chunk)
             extracted.append(target)
 
     return extracted
