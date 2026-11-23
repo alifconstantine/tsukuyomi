@@ -133,7 +133,10 @@ def check_status() -> dict[str, object]:
     }
 
 
-def _wine_env(prefix: Path, *, wayland: bool = False, dxvk: bool = True, runner: str = "wine") -> dict[str, str]:
+def _wine_env(
+    prefix: Path, *, wayland: bool = False, dxvk: bool = True,
+    runner: str = "wine", headless: bool = False,
+) -> dict[str, str]:
     env = os.environ.copy()
     env["WINEPREFIX"] = str(prefix)
     env["WINEARCH"] = "win64"
@@ -147,10 +150,14 @@ def _wine_env(prefix: Path, *, wayland: bool = False, dxvk: bool = True, runner:
     for directory, dll in (("mono", "mscoree"), ("gecko", "mshtml")):
         if not any(Path("/usr/share/wine", directory).glob("*")):
             overrides.append(f"{dll}=")
-    env["WINEDLLOVERRIDES"] = ";".join(overrides)
-    if wayland and env.get("WAYLAND_DISPLAY"):
+    if headless:
+        env.pop("DISPLAY", None)
+        env.pop("WAYLAND_DISPLAY", None)
+        overrides.append("winex11.drv,winewayland.drv=")
+    elif wayland and env.get("WAYLAND_DISPLAY"):
         # Unsetting DISPLAY lets winewayland.drv take over cleanly when requested.
         env.pop("DISPLAY", None)
+    env["WINEDLLOVERRIDES"] = ";".join(overrides)
     if runner == "umu":
         env["GAMEID"] = env.get("GAMEID", "umu-default")
         for p in (
@@ -289,7 +296,7 @@ def _apply_prefix_hardening_and_theme(
         tf.write(reg_content)
         reg_file = Path(tf.name)
     try:
-        env = _wine_env(prefix, wayland=wayland, dxvk=dxvk)
+        env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, headless=True)
         subprocess.run(
             ["wine", "regedit", "/S", str(reg_file)],
             env=env,
@@ -299,6 +306,13 @@ def _apply_prefix_hardening_and_theme(
             timeout=30,
             check=True,
         )
+        if sandbox:
+            # The sandbox uses a separate wineserver. Flush the registry before
+            # it opens the prefix, including when upgrading an existing prefix.
+            subprocess.run(
+                ["wineserver", "-w"], env=env, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=30, check=True,
+            )
     finally:
         reg_file.unlink(missing_ok=True)
 
@@ -324,11 +338,7 @@ def _ensure_prefix(
     is_new = not all((prefix / name).is_file() for name in ("system.reg", "user.reg"))
     prefix.mkdir(parents=True, exist_ok=True)
     if is_new:
-        env = _wine_env(prefix, wayland=wayland, dxvk=dxvk)
-        # The Tsukuyomi wizard owns progress. Wine can initialize without a display.
-        env.pop("DISPLAY", None)
-        env.pop("WAYLAND_DISPLAY", None)
-        env["WINEDLLOVERRIDES"] += ";winex11.drv,winewayland.drv="
+        env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, headless=True)
         subprocess.run(
             ["wineboot", "--init"],
             env=env,
@@ -353,13 +363,6 @@ def _ensure_prefix(
         prefix, sandbox=sandbox, wayland=wayland, dxvk=dxvk,
         hide_standalone_tray=hide_standalone_tray, force=is_new,
     )
-    if is_new and sandbox:
-        # A setup in Bubblewrap starts a separate server. Let the first
-        # registry import flush before that server opens the same prefix.
-        subprocess.run(
-            ["wineserver", "-w"], env=_wine_env(prefix, wayland=wayland, dxvk=dxvk),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=True,
-        )
     return prefix
 
 
@@ -951,6 +954,26 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"tsukuyomi-win: executable missing: {exe}", file=sys.stderr)
         return 1
 
+    if (exe.name.casefold() == "antigravity.exe" and rec.get("sandbox", True)
+            and (rec.get("runner") or "wine") == "wine" and not args.extra_args):
+        # Each Bubblewrap launch has its own Wine server. Two clicks therefore
+        # bypass Antigravity's own single-instance check.
+        runtime = xdg_runtime_dir()
+        runtime.mkdir(parents=True, exist_ok=True)
+        with (runtime / f"tsukuyomi-win-launch-{app_id}.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                run_cmd(
+                    ["hyprctl", "dispatch", 'hl.dsp.focus({ window = "class:(?i)^antigravity[.]exe$" })'],
+                    timeout=3,
+                )
+                return 0
+            return _run_registered_app(args, rec, prefix, exe)
+    return _run_registered_app(args, rec, prefix, exe)
+
+
+def _run_registered_app(args: argparse.Namespace, rec: dict, prefix: Path, exe: Path) -> int:
     wayland = bool(rec.get("wayland", False))
     dxvk = bool(rec.get("dxvk", True))
     sandbox = bool(rec.get("sandbox", True))
@@ -958,7 +981,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     antigravity = exe.name.casefold() == "antigravity.exe"
 
     _ensure_prefix(
-        slug, sandbox=sandbox, wayland=wayland, dxvk=dxvk,
+        prefix.name, sandbox=sandbox, wayland=wayland, dxvk=dxvk,
         hide_standalone_tray=antigravity,
     )
     env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, runner=runner)
