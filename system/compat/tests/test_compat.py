@@ -112,11 +112,15 @@ class CompatTests(unittest.TestCase):
             options = {"sandbox": False, "wayland": False, "dxvk": False}
             imports = []
 
-            def capture_import(argv, **_kwargs):
+            def capture_import(argv, *, env, **_kwargs):
+                self.assertNotIn("DISPLAY", env)
+                self.assertNotIn("WAYLAND_DISPLAY", env)
+                self.assertIn("winex11.drv,winewayland.drv=", env["WINEDLLOVERRIDES"])
                 imports.append(Path(argv[-1]).read_text())
 
             with mock.patch.object(tsukuyomi_win, "detect_hypr_monitor", return_value={"scale": 1}), \
                     mock.patch.object(tsukuyomi_win, "detect_theme_dark", return_value=True), \
+                    mock.patch.dict(os.environ, {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-1"}), \
                     mock.patch.object(tsukuyomi_win.subprocess, "run", side_effect=capture_import):
                 tsukuyomi_win._apply_prefix_hardening_and_theme(prefix, **options)
                 tsukuyomi_win._apply_prefix_hardening_and_theme(prefix, hide_standalone_tray=True, **options)
@@ -125,6 +129,32 @@ class CompatTests(unittest.TestCase):
             self.assertEqual(len(imports), 2)
             self.assertNotIn("ShowSystray", imports[0])
             self.assertIn('"ShowSystray"=dword:00000000', imports[1])
+
+    def test_phone_viewport_preserves_width_on_short_display(self) -> None:
+        with mock.patch.object(
+            tsukuyomi_droid, "detect_hypr_monitor",
+            return_value={"width": 1920, "height": 1200, "scale": 1.5},
+        ):
+            self.assertEqual(tsukuyomi_droid._phone_viewport("auto"), (480, 688))
+            self.assertEqual(tsukuyomi_droid._phone_viewport("compact"), (390, 688))
+            self.assertEqual(tsukuyomi_droid._phone_viewport("wide"), (550, 688))
+
+    def test_antigravity_duplicate_launch_focuses_existing_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            exe = root / "Antigravity.exe"
+            exe.touch()
+            args = tsukuyomi_win.argparse.Namespace(app_id="antigravity", extra_args=[])
+            record = {"slug": "antigravity", "exe": str(exe)}
+            with (root / "tsukuyomi-win-launch-antigravity.lock").open("a") as lock, \
+                    mock.patch.object(tsukuyomi_win, "xdg_runtime_dir", return_value=root), \
+                    mock.patch.object(tsukuyomi_win, "read_json", return_value=record), \
+                    mock.patch.object(tsukuyomi_win, "_run_registered_app") as run, \
+                    mock.patch.object(tsukuyomi_win, "run_cmd") as dispatch:
+                tsukuyomi_win.fcntl.flock(lock, tsukuyomi_win.fcntl.LOCK_EX)
+                self.assertEqual(tsukuyomi_win.cmd_run(args), 0)
+                run.assert_not_called()
+                self.assertIn("hl.dsp.focus", dispatch.call_args.args[0][2])
 
     def test_validators_reject_injection(self) -> None:
         self.assertEqual(compat_common.validate_slug("notepad-plus-2"), "notepad-plus-2")
