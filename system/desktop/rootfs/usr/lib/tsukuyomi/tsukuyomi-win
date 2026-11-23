@@ -271,12 +271,13 @@ def _apply_prefix_hardening_and_theme(
     wayland: bool,
     dxvk: bool,
     hide_standalone_tray: bool = False,
+    light_setup: bool = False,
     force: bool = False,
 ) -> None:
     mon = detect_hypr_monitor()
     scale = max(1.0, min(3.0, float(mon.get("scale", 1.0))))
     dpi = int(round(96 * scale))
-    dark = detect_theme_dark()
+    dark = not light_setup and detect_theme_dark()
 
     state_sig = {
         "sandbox": sandbox,
@@ -437,7 +438,8 @@ def _apply_prefix_hardening_and_theme(
 
 
 def _ensure_prefix(
-    slug: str, *, sandbox: bool, wayland: bool, dxvk: bool, hide_standalone_tray: bool = False,
+    slug: str, *, sandbox: bool, wayland: bool, dxvk: bool,
+    hide_standalone_tray: bool = False, light_setup: bool = False,
 ) -> Path:
     validate_slug(slug)
     prefix = prefixes_dir() / slug
@@ -454,7 +456,7 @@ def _ensure_prefix(
             raise ValueError("Could not prepare the Windows environment.")
     _apply_prefix_hardening_and_theme(
         prefix, sandbox=sandbox, wayland=wayland, dxvk=dxvk,
-        hide_standalone_tray=hide_standalone_tray, force=is_new,
+        hide_standalone_tray=hide_standalone_tray, light_setup=light_setup, force=is_new,
     )
     return prefix
 
@@ -935,8 +937,12 @@ def _install_in_prefix(
     lock_fd: int, sandbox: bool, wayland: bool, dxvk: bool, runner: str, antigravity_setup: bool,
 ) -> int:
     mode = args.mode
+    msi = src.suffix.lower() == ".msi"
+    # MSI dialogs can paint embedded black text. Use the standard light
+    # controls during setup, then apply the desktop preference at app launch.
     prefix = _ensure_prefix(
         slug, sandbox=sandbox, wayland=wayland, dxvk=dxvk, hide_standalone_tray=antigravity_setup,
+        light_setup=msi,
     )
     env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, runner=runner)
 
@@ -996,7 +1002,7 @@ def _install_in_prefix(
         # proof that Get-CimInstance found a process. Use its tasklist path.
         env["WINEDLLOVERRIDES"] += ";powershell.exe="
     base_bin = ["umu-run"] if runner == "umu" else ["wine"]
-    if src.suffix.lower() == ".msi":
+    if msi:
         base_bin += ["msiexec", "/i"]
     if sandbox:
         mount_root = Path("/mnt/tsukuyomi-src")
