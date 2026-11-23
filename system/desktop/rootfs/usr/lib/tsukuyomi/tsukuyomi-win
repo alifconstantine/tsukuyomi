@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Optional
 from urllib.parse import unquote, urlparse
 
@@ -35,7 +35,7 @@ from compat_common import (
     xdg_data_home,
     xdg_runtime_dir,
 )
-from win_lnk import extract_exe_icon_png, inspect_pe
+from win_lnk import extract_exe_icon_png, inspect_pe, parse_lnk, split_windows_args
 
 SKIP_EXE_STEMS = (
     "unins",
@@ -170,6 +170,39 @@ def _wine_env(
     return env
 
 
+def _check_runner(runner: str, sandbox: bool) -> None:
+    if runner not in ("wine", "umu"):
+        raise ValueError("Choose Wine Staging or UMU Proton in the Windows app settings.")
+    if sandbox and runner == "umu":
+        raise ValueError("Bubblewrap isolation is available with Wine Staging. Select Wine Staging or explicitly turn isolation off for UMU Proton.")
+
+
+def _prefix_path(prefix: Path, relative: str) -> Path:
+    path = prefix / relative
+    if prefix.is_symlink() or not path.resolve().is_relative_to(prefix.resolve()):
+        raise ValueError("A Windows environment path points outside its prefix.")
+    return path
+
+
+def _run_prefix_setup(
+    argv: list[str], *, env: dict[str, str], prefix: Path, sandbox: bool,
+    timeout: int,
+) -> None:
+    # Wait in the namespace that started Wine so the registry is written
+    # before a fresh application sandbox opens the same prefix.
+    command = ["sh", "-c", '"$@" && wineserver -w', "tsukuyomi-wine", *argv]
+    if sandbox:
+        command = _build_bwrap_argv(command, env=env, prefix=prefix, ro_binds=[], cwd=None)
+    subprocess.run(
+        command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=timeout, check=True,
+    )
+
+
+def _wait_for_wine_children(argv: list[str]) -> list[str]:
+    return ["sh", "-c", '"$@"; status=$?; wineserver -w; exit "$status"', "tsukuyomi-wine", *argv]
+
+
 def _apply_prefix_hardening_and_theme(
     prefix: Path,
     *,
@@ -191,7 +224,7 @@ def _apply_prefix_hardening_and_theme(
         "dpi": dpi,
         "dark": dark,
     }
-    meta_file = prefix / ".tsukuyomi-prefix.json"
+    meta_file = _prefix_path(prefix, ".tsukuyomi-prefix.json")
     prev_meta = read_json(meta_file, {})
     prev_state = prev_meta.get("appliedState", {}) if isinstance(prev_meta, dict) else {}
     # This is a Wine prefix setting, including when several apps share a prefix.
@@ -204,8 +237,8 @@ def _apply_prefix_hardening_and_theme(
         return
 
     user = os.environ.get("USER") or Path.home().name
-    users_dir = prefix / "drive_c" / "users" / user
-    dosdevices = prefix / "dosdevices"
+    users_dir = _prefix_path(prefix, f"drive_c/users/{user}")
+    dosdevices = _prefix_path(prefix, "dosdevices")
     dosdevices.mkdir(parents=True, exist_ok=True)
     if sandbox and users_dir.is_dir():
         for folder in ("Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos"):
@@ -235,7 +268,7 @@ def _apply_prefix_hardening_and_theme(
                 continue
             for arch_src, win_dst in (("x64", "system32"), ("x32", "syswow64"), ("x86", "syswow64")):
                 src_dir = base_dir / arch_src
-                dst_dir = prefix / "drive_c" / "windows" / win_dst
+                dst_dir = _prefix_path(prefix, f"drive_c/windows/{win_dst}")
                 if src_dir.is_dir() and dst_dir.is_dir():
                     for dll in src_dir.glob("*.dll"):
                         target = dst_dir / dll.name
@@ -292,26 +325,21 @@ def _apply_prefix_hardening_and_theme(
         # Without an XEmbed tray host, Wine Explorer creates its own strip.
         # This disables only that fallback window, leaving host docking enabled.
         reg_content += '[HKEY_CURRENT_USER\\Software\\Wine\\Explorer]\n"ShowSystray"=dword:00000000\n\n'
-    with tempfile.NamedTemporaryFile("w", suffix=".reg", delete=False, encoding="utf-8") as tf:
+    reg_dir = _prefix_path(prefix, "drive_c") if sandbox else None
+    with tempfile.NamedTemporaryFile("w", suffix=".reg", dir=reg_dir, delete=False, encoding="utf-8") as tf:
         tf.write(reg_content)
         reg_file = Path(tf.name)
     try:
         env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, headless=True)
-        subprocess.run(
-            ["wine", "regedit", "/S", str(reg_file)],
-            env=env,
-            shell=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=30,
-            check=True,
-        )
         if sandbox:
-            # The sandbox uses a separate wineserver. Flush the registry before
-            # it opens the prefix, including when upgrading an existing prefix.
+            _run_prefix_setup(
+                ["wine", "regedit", "/S", f"C:\\{reg_file.name}"], env=env, prefix=prefix,
+                sandbox=True, timeout=45,
+            )
+        else:
             subprocess.run(
-                ["wineserver", "-w"], env=env, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, timeout=30, check=True,
+                ["wine", "regedit", "/S", str(reg_file)], env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30, check=True,
             )
     finally:
         reg_file.unlink(missing_ok=True)
@@ -335,27 +363,14 @@ def _ensure_prefix(
 ) -> Path:
     validate_slug(slug)
     prefix = prefixes_dir() / slug
+    for relative in ("drive_c", "dosdevices", "system.reg", "user.reg"):
+        _prefix_path(prefix, relative)
     is_new = not all((prefix / name).is_file() for name in ("system.reg", "user.reg"))
     prefix.mkdir(parents=True, exist_ok=True)
     if is_new:
         env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, headless=True)
-        subprocess.run(
-            ["wineboot", "--init"],
-            env=env,
-            shell=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=120,
-            check=True,
-        )
-        subprocess.run(
-            ["wineserver", "-w"],
-            env=env,
-            shell=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=60,
-            check=True,
+        _run_prefix_setup(
+            ["wineboot", "--init"], env=env, prefix=prefix, sandbox=sandbox, timeout=150,
         )
         if not all((prefix / name).is_file() for name in ("system.reg", "user.reg")):
             raise ValueError("Could not prepare the Windows environment.")
@@ -375,20 +390,36 @@ def _start_menu_dirs(prefix: Path) -> list[Path]:
 
 
 def _snapshot_lnk_and_exe(prefix: Path) -> tuple[dict[Path, int], dict[Path, int]]:
-    lnks: dict[Path, int] = {}
-    for d in _start_menu_dirs(prefix):
-        if d.is_dir():
-            lnks.update((p, p.stat().st_mtime_ns) for p in d.rglob("*.lnk") if p.is_file())
-    exes: dict[Path, int] = {}
+    drive = _prefix_path(prefix, "drive_c")
+    root = drive.resolve()
     user = os.environ.get("USER") or Path.home().name
-    for base in (
-        prefix / "drive_c" / "Program Files",
-        prefix / "drive_c" / "Program Files (x86)",
-        prefix / "drive_c" / "users" / user / "AppData" / "Local" / "Programs",
-    ):
-        if base.is_dir():
-            exes.update((p, p.stat().st_mtime_ns) for p in base.rglob("*.exe") if p.is_file())
-    return lnks, exes
+    profile = drive / "users" / user
+    desktop = profile / "Desktop"
+    roots = [profile / "AppData" / "Local", profile / "AppData" / "Roaming", desktop]
+    if drive.is_dir():
+        roots.extend(p for p in drive.iterdir() if p.name.casefold() not in ("windows", "users", "perflogs"))
+    skip = {"cache", "code cache", "gpucache", "temp", "package cache", "node_modules"}
+    def snapshot(bases: list[Path], suffix: str) -> dict[Path, int]:
+        found = {}
+        for base in bases:
+            if not base.resolve().is_relative_to(root) or base.is_symlink():
+                continue
+            if base.is_file() and base.suffix.lower() == suffix:
+                found[base] = base.stat().st_mtime_ns
+                continue
+            for directory, dirs, files in os.walk(base):
+                dirs[:] = [name for name in dirs if name.casefold() not in skip]
+                for name in files:
+                    path = Path(directory) / name
+                    if path.suffix.lower() != suffix or path.is_symlink():
+                        continue
+                    try:
+                        if path.is_file():
+                            found[path] = path.stat().st_mtime_ns
+                    except FileNotFoundError:
+                        continue
+        return found
+    return snapshot(_start_menu_dirs(prefix) + [desktop], ".lnk"), snapshot(roots, ".exe")
 
 
 def _win_to_prefix_path(prefix: Path, win_path: str) -> Optional[Path]:
@@ -419,8 +450,6 @@ def _is_clutter_exe(path: Path) -> bool:
 
 
 def scan_shortcuts(prefix: Path, before_lnks: dict[Path, int], before_exes: dict[Path, int]) -> list[dict[str, object]]:
-    from win_lnk import parse_lnk
-
     after_lnks, after_exes = _snapshot_lnk_and_exe(prefix)
     new_lnks = {p for p, stamp in after_lnks.items() if before_lnks.get(p) != stamp}
     new_exes = {p for p, stamp in after_exes.items() if before_exes.get(p) != stamp}
@@ -449,7 +478,7 @@ def scan_shortcuts(prefix: Path, before_lnks: dict[Path, int], before_exes: dict
             {
                 "name": sanitize_desktop_value(lnk.stem, resolved.stem),
                 "exe": str(resolved),
-                "args": parsed.get("arguments", ""),
+                "args": shlex.join(split_windows_args(parsed.get("arguments", ""))),
                 "source": "shortcut",
             }
         )
@@ -566,13 +595,25 @@ def _build_bwrap_argv(
         "--proc", "/proc",
         "--tmpfs", "/tmp",
         "--tmpfs", "/dev/shm",
+        "--clearenv",
+        "--setenv", "PATH", "/usr/bin:/bin",
     ]
-    for sys_dir in ("/usr", "/etc", "/sys", "/opt"):
+    session_vars = {
+        "USER", "LOGNAME", "HOME", "LANG", "LANGUAGE", "DISPLAY", "WAYLAND_DISPLAY",
+        "XAUTHORITY", "XDG_RUNTIME_DIR", "WINEPREFIX", "WINEARCH", "WINEDEBUG",
+        "WINE_NTSYNC", "WINEDLLOVERRIDES", "DRI_PRIME",
+    }
+    for key, value in env.items():
+        if key in session_vars or key.startswith("LC_"):
+            bwrap.extend(["--setenv", key, value])
+    for sys_dir in ("/usr", "/sys"):
         if Path(sys_dir).exists():
             bwrap.extend(["--ro-bind", sys_dir, sys_dir])
-    resolv_conf = Path("/etc/resolv.conf").resolve()
-    if resolv_conf != Path("/etc/resolv.conf") and resolv_conf.is_file():
-        bwrap.extend(["--ro-bind", str(resolv_conf), str(resolv_conf)])
+    for filename in ("ld.so.cache", "ld.so.conf", "ld.so.conf.d", "localtime", "fonts", "ssl",
+                     "ca-certificates", "pki", "hosts", "resolv.conf", "nsswitch.conf", "passwd", "group"):
+        config = Path("/etc") / filename
+        if config.exists():
+            bwrap.extend(["--ro-bind", str(config.resolve()), str(config)])
     for link_dir in ("/bin", "/sbin", "/lib", "/lib64"):
         p = Path(link_dir)
         if p.is_symlink():
@@ -582,14 +623,17 @@ def _build_bwrap_argv(
     if Path("/var/cache/fontconfig").is_dir():
         bwrap.extend(["--ro-bind", "/var/cache/fontconfig", "/var/cache/fontconfig"])
 
-    for dev_path in ("/dev/dri", "/dev/ntsync", "/dev/snd", "/dev/input"):
+    for dev_path in ("/dev/dri", "/dev/ntsync", "/dev/snd"):
         if Path(dev_path).exists():
             bwrap.extend(["--dev-bind", dev_path, dev_path])
     for nv in sorted(Path("/dev").glob("nvidia*")):
         bwrap.extend(["--dev-bind", str(nv), str(nv)])
 
-    if Path("/tmp/.X11-unix").exists():
-        bwrap.extend(["--bind", "/tmp/.X11-unix", "/tmp/.X11-unix"])
+    display = re.fullmatch(r"(?:unix)?:([0-9]+)(?:\.[0-9]+)?", env.get("DISPLAY", ""))
+    if display:
+        x11_socket = f"/tmp/.X11-unix/X{display[1]}"
+        if Path(x11_socket).is_socket():
+            bwrap.extend(["--bind", x11_socket, x11_socket])
     xauth = env.get("XAUTHORITY")
     if xauth and Path(xauth).is_file():
         bwrap.extend(["--ro-bind", xauth, xauth])
@@ -598,14 +642,16 @@ def _build_bwrap_argv(
     if rt.is_dir():
         bwrap.extend(["--dir", str(rt)])
         # Explicitly exclude D-Bus session bus to prevent host sandbox escapes.
-        for sock_name in filter(None, [env.get("WAYLAND_DISPLAY"), "pipewire-0", "pipewire-0-manager", "pulse"]):
+        for sock_name in filter(None, [env.get("WAYLAND_DISPLAY"), "pipewire-0", "pulse"]):
+            if Path(sock_name).name != sock_name or sock_name in (".", ".."):
+                continue
             sock = rt / sock_name
             if sock.exists():
                 bwrap.extend(["--bind", str(sock), str(sock)])
 
     home = Path.home()
     bwrap.extend(["--dir", str(home)])
-    pfx_cache = prefix / ".cache"
+    pfx_cache = _prefix_path(prefix, ".cache")
     pfx_cache.mkdir(parents=True, exist_ok=True)
     bwrap.extend(["--bind", str(pfx_cache), str(home / ".cache")])
     bwrap.extend(["--bind", str(prefix), str(prefix)])
@@ -642,14 +688,14 @@ def _is_safe_portable_bundle_dir(folder: Path) -> bool:
         Path("/tmp").resolve(),
         Path("/var/tmp").resolve(),
     }
-    if resolved in blocked:
+    if resolved in blocked or resolved.parent == resolved:
         return False
     total_bytes = 0
     file_count = 0
     for p in resolved.rglob("*"):
         if p.is_file() and not p.is_symlink():
             file_count += 1
-            if file_count > 200:
+            if file_count > 2048:
                 return False
             try:
                 total_bytes += p.stat().st_size
@@ -658,6 +704,14 @@ def _is_safe_portable_bundle_dir(folder: Path) -> bool:
             if total_bytes > 512 * 1024 * 1024:
                 return False
     return True
+
+
+def _installer_binds(src: Path, mount_root: Path, share_folder: bool) -> list[tuple[Path, Path]]:
+    if share_folder:
+        if not _is_safe_portable_bundle_dir(src.parent):
+            raise ValueError("Put the installer and its companion files in a dedicated folder before sharing it.")
+        return [(src.parent, mount_root)]
+    return [(src, mount_root / src.name)]
 
 
 def _decode_uri_path(raw: str) -> str:
@@ -696,7 +750,7 @@ def _installation_prefix(slug: str, *, fresh: bool):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise ValueError("Another Windows setup is using this app environment.") from exc
+            raise ValueError("Another Windows app or setup is using this environment. Close it and try again.") from exc
         try:
             yield prefix
         except (Exception, KeyboardInterrupt):
@@ -732,14 +786,20 @@ def _install(args: argparse.Namespace) -> int:
     # If user opened a Windows .lnk shortcut directly, resolve local target when possible
     lnk_extra_args: list[str] = []
     if src.suffix.lower() == ".lnk":
-        from win_lnk import parse_lnk
         parsed = parse_lnk(src)
-        if parsed and parsed.get("target"):
-            rel_cand = (src.parent / parsed["target"].replace("\\", "/")).resolve()
-            if rel_cand.is_file():
-                src = rel_cand
-                if parsed.get("arguments"):
-                    lnk_extra_args = shlex.split(parsed["arguments"])
+        if not parsed:
+            raise ValueError("This file is not a readable Windows shortcut.")
+        for target in (parsed["relative_path"], parsed["target"]):
+            relative = PureWindowsPath(target)
+            if relative.anchor:
+                continue
+            candidate = src.parent.joinpath(*relative.parts).resolve()
+            if candidate.is_relative_to(src.parent) and candidate.is_file():
+                src = candidate
+                lnk_extra_args = split_windows_args(parsed["arguments"])
+                break
+        else:
+            raise ValueError("This shortcut has no local target. Open its original Windows EXE or MSI.")
     if src.suffix.lower() not in (".exe", ".msi"):
         raise ValueError("Choose a Windows .exe or .msi, or a .lnk with a local target.")
 
@@ -749,12 +809,20 @@ def _install(args: argparse.Namespace) -> int:
     wayland = args.wayland if args.wayland is not None else bool(cfg["defaultWayland"])
     dxvk = args.dxvk if args.dxvk is not None else bool(cfg["defaultDxvk"])
     runner = args.runner or str(cfg["defaultRunner"])
+    _check_runner(runner, sandbox)
+    if src.suffix.lower() == ".msi":
+        if mode == "portable":
+            raise ValueError("An MSI package uses Windows Installer. Choose Install Windows App.")
+        if runner == "umu":
+            raise ValueError("Choose Wine Staging to install an MSI package.")
     if not shutil.which("wine"):
         raise ValueError("The Windows runtime is missing. Install or update Tsukuyomi's compatibility packages.")
     if runner == "umu" and not shutil.which("umu-run"):
         raise ValueError("The Proton runner is missing. Choose the bundled Windows runtime in Options.")
 
     pe_info = inspect_pe(src)
+    if error := pe_info.get("error"):
+        raise ValueError(str(error))
     if pe_info["arch"] == "arm64":
         raise ValueError("This Windows executable is for ARM64. Choose the x64 or x86 download.")
     app_name = sanitize_desktop_value(args.name or str(pe_info.get("product_name") or src.stem), src.stem)
@@ -789,19 +857,18 @@ def _install_in_prefix(
 
     if mode == "portable" and not args.pin_portable:
         base_bin = ["umu-run"] if runner == "umu" else ["wine"]
-        if sandbox and runner != "umu":
+        if sandbox:
             mount_root = Path("/mnt/tsukuyomi-src")
-            if src.parent.resolve() == Path.home().resolve():
-                ro_binds = [(src, mount_root / src.name)]
-                run_target = f"E:\\{src.name}"
-            else:
-                ro_binds = [(src.parent, mount_root)]
-                run_target = f"E:\\{src.name}"
+            ro_binds = _installer_binds(src, mount_root, args.share_installer_folder)
+            run_target = f"E:\\{src.name}"
             e_drive = prefix / "dosdevices" / "e:"
             e_drive.unlink(missing_ok=True)
             e_drive.symlink_to(mount_root)
             try:
-                argv = _build_bwrap_argv(base_bin + [run_target] + lnk_extra_args, env=env, prefix=prefix, ro_binds=ro_binds, cwd=None)
+                argv = _build_bwrap_argv(
+                    _wait_for_wine_children(base_bin + [run_target] + lnk_extra_args),
+                    env=env, prefix=prefix, ro_binds=ro_binds, cwd=None,
+                )
                 subprocess.run(argv, env=env, stdout=sys.stderr, check=True)
             finally:
                 e_drive.unlink(missing_ok=True)
@@ -839,24 +906,24 @@ def _install_in_prefix(
         return 0
 
     e_drive = prefix / "dosdevices" / "e:"
-    use_bwrap_install = sandbox and runner != "umu"
+    use_bwrap_install = sandbox
     if runner == "wine" and antigravity_setup:
         # Google's NSIS build treats the Wine PowerShell stub's exit 0 as
         # proof that Get-CimInstance found a process. Use its tasklist path.
         env["WINEDLLOVERRIDES"] += ";powershell.exe="
-    if src.suffix.lower() == ".msi" and runner == "umu":
-        raise ValueError("Choose the bundled Windows runtime to install an .msi file.")
     base_bin = ["umu-run"] if runner == "umu" else ["wine"]
     if src.suffix.lower() == ".msi":
         base_bin += ["msiexec", "/i"]
     if use_bwrap_install:
         mount_root = Path("/mnt/tsukuyomi-src")
-        if src.parent.resolve() == Path.home().resolve():
-            ro_binds = [(src, mount_root / src.name)]
-        else:
-            ro_binds = [(src.parent, mount_root)]
+        ro_binds = _installer_binds(src, mount_root, args.share_installer_folder)
         target_arg = f"E:\\{src.name}"
-        argv = _build_bwrap_argv(base_bin + [target_arg] + lnk_extra_args, env=env, prefix=prefix, ro_binds=ro_binds, cwd=None)
+        # Setup launchers can exit before their real installer starts writing.
+        # Keep it alive in the same PID namespace and scan only after it exits.
+        argv = _build_bwrap_argv(
+            _wait_for_wine_children(base_bin + [target_arg] + lnk_extra_args),
+            env=env, prefix=prefix, ro_binds=ro_binds, cwd=None,
+        )
         e_drive.unlink(missing_ok=True)
         e_drive.symlink_to(mount_root)
         popen_cwd = None
@@ -974,11 +1041,19 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def _run_registered_app(args: argparse.Namespace, rec: dict, prefix: Path, exe: Path) -> int:
+    with _installation_prefix(prefix.name, fresh=False):
+        return _launch_registered_app(args, rec, prefix, exe)
+
+
+def _launch_registered_app(args: argparse.Namespace, rec: dict, prefix: Path, exe: Path) -> int:
     wayland = bool(rec.get("wayland", False))
     dxvk = bool(rec.get("dxvk", True))
     sandbox = bool(rec.get("sandbox", True))
     runner = str(rec.get("runner") or "wine")
     antigravity = exe.name.casefold() == "antigravity.exe"
+    _check_runner(runner, sandbox)
+    if exe.suffix.lower() != ".exe" or not exe.resolve().is_relative_to(_prefix_path(prefix, "drive_c").resolve()):
+        raise ValueError("The Windows executable must be inside its app environment.")
 
     _ensure_prefix(
         prefix.name, sandbox=sandbox, wayland=wayland, dxvk=dxvk,
@@ -1000,12 +1075,14 @@ def _run_registered_app(args: argparse.Namespace, rec: dict, prefix: Path, exe: 
     for idx, raw in enumerate(args.extra_args):
         decoded = _decode_uri_path(raw)
         p = Path(decoded)
-        if p.exists() and sandbox and runner != "umu":
+        if p.exists() and sandbox:
             rp = p.resolve()
             dst = open_root / f"f{idx}" / rp.name
             ro_binds.append((rp, dst))
             converted_user_args.append(f"E:\\f{idx}\\{rp.name}")
             mapped_open = True
+        elif sandbox:
+            converted_user_args.append(decoded)
         else:
             converted_user_args.append(_convert_arg_for_wine(prefix, decoded, env))
 
@@ -1014,13 +1091,15 @@ def _run_registered_app(args: argparse.Namespace, rec: dict, prefix: Path, exe: 
     base_bin = ["umu-run"] if runner == "umu" else ["wine"]
     argv = base_bin + [str(exe)] + extra_args + converted_user_args
 
-    if sandbox and runner != "umu":
+    if sandbox:
         e_drive = prefix / "dosdevices" / "e:"
         if mapped_open:
             e_drive.unlink(missing_ok=True)
             e_drive.symlink_to(open_root)
         try:
-            bwrap_argv = _build_bwrap_argv(argv, env=env, prefix=prefix, ro_binds=ro_binds, cwd=exe.parent)
+            bwrap_argv = _build_bwrap_argv(
+                _wait_for_wine_children(argv), env=env, prefix=prefix, ro_binds=ro_binds, cwd=exe.parent,
+            )
             return subprocess.run(bwrap_argv, env=env, shell=False).returncode
         finally:
             if mapped_open:
@@ -1059,6 +1138,11 @@ def cmd_configure(args: argparse.Namespace) -> int:
         rec["sandbox"] = args.sandbox
     if args.dxvk is not None:
         rec["dxvk"] = args.dxvk
+    try:
+        _check_runner(str(rec.get("runner") or "wine"), bool(rec.get("sandbox", True)))
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
     _write_desktop_entry(rec)
     print(json.dumps({"ok": True, "app": rec}))
     return 0
@@ -1093,13 +1177,21 @@ def cmd_tool(args: argparse.Namespace, tool: str) -> int:
     rec = read_json(apps_dir() / f"{app_id}.json")
     if not isinstance(rec, dict):
         return 1
-    prefix = prefixes_dir() / validate_slug(str(rec["slug"]))
-    env = _wine_env(prefix, wayland=bool(rec.get("wayland", False)), dxvk=bool(rec.get("dxvk", True)))
-    if tool == "winecfg":
-        return subprocess.run(["winecfg"], env=env, shell=False).returncode
-    if tool == "winetricks" and shutil.which("winetricks"):
-        return subprocess.run(["winetricks", "--gui"], env=env, shell=False).returncode
-    return 1
+    slug = validate_slug(str(rec["slug"]))
+    command = ["winecfg"] if tool == "winecfg" else ["winetricks", "--gui"]
+    if not shutil.which(command[0]):
+        return 1
+    try:
+        with _installation_prefix(slug, fresh=False) as prefix:
+            env = _wine_env(prefix, wayland=bool(rec.get("wayland", False)), dxvk=bool(rec.get("dxvk", True)))
+            if rec.get("sandbox", True):
+                command = _build_bwrap_argv(
+                    _wait_for_wine_children(command), env=env, prefix=prefix, ro_binds=[], cwd=None,
+                )
+            return subprocess.run(command, env=env, shell=False).returncode
+    except (OSError, ValueError) as exc:
+        print(f"tsukuyomi-win: {exc}", file=sys.stderr)
+        return 1
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -1110,27 +1202,30 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         print(json.dumps({"ok": False, "error": f"App not found: {app_id}"}))
         return 1
     slug = validate_slug(str(rec["slug"]))
+    try:
+        with _installation_prefix(slug, fresh=False) as prefix:
+            _remove_registered_app(app_id, rec_path, prefix)
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 1
+    return 0
+
+
+def _remove_registered_app(app_id: str, rec_path: Path, prefix: Path) -> None:
+    # Keep a shared prefix until its last launcher has been removed.
+    keep_prefix = any(
+        isinstance(data := read_json(other), dict) and data.get("slug") == prefix.name
+        for other in apps_dir().glob("*.json")
+        if other != rec_path
+    )
+    if not keep_prefix and prefix.is_dir():
+        shutil.rmtree(prefix)
+
     (applications_dir() / f"tsukuyomi-win-{app_id}.desktop").unlink(missing_ok=True)
     (icons_hicolor_dir() / f"tsukuyomi-win-{app_id}.png").unlink(missing_ok=True)
     rec_path.unlink(missing_ok=True)
-
-    # Remove prefix only if no remaining apps reference this slug
-    still_used = False
-    if apps_dir().is_dir():
-        for other in apps_dir().glob("*.json"):
-            data = read_json(other)
-            if isinstance(data, dict) and data.get("slug") == slug:
-                still_used = True
-                break
-    if not still_used:
-        prefix = prefixes_dir() / slug
-        if prefix.is_dir():
-            run_cmd(["wineserver", "-k"], env=_wine_env(prefix), timeout=10)
-            shutil.rmtree(prefix, ignore_errors=True)
-
     refresh_desktop_caches()
-    print(json.dumps({"ok": True, "removed": app_id, "prefixRemoved": not still_used}))
-    return 0
+    print(json.dumps({"ok": True, "removed": app_id, "prefixRemoved": not keep_prefix}))
 
 
 def parse_bool_str(v: str) -> bool:
@@ -1162,6 +1257,7 @@ def main(argv: list[str]) -> int:
     p_inst.add_argument("--sandbox", type=parse_bool_str, default=None)
     p_inst.add_argument("--dxvk", type=parse_bool_str, default=None)
     p_inst.add_argument("--pin-portable", action="store_true")
+    p_inst.add_argument("--share-installer-folder", action="store_true")
 
     p_exp = sub.add_parser("export-desktop")
     p_exp.add_argument("slug")
@@ -1198,6 +1294,9 @@ def main(argv: list[str]) -> int:
             print(json.dumps({"error": "Choose a Windows .exe, .msi or .lnk file."}))
             return 1
         info = inspect_pe(src)
+        if info.get("error"):
+            print(json.dumps(info))
+            return 1
         icon_tmp = xdg_runtime_dir() / "tsukuyomi-win-preview.png"
         icon_tmp.unlink(missing_ok=True)
         if extract_exe_icon_png(src, icon_tmp):
@@ -1233,6 +1332,11 @@ def main(argv: list[str]) -> int:
             cfg["defaultSandbox"] = args.sandbox
         if args.dxvk is not None:
             cfg["defaultDxvk"] = args.dxvk
+        try:
+            _check_runner(str(cfg["defaultRunner"]), bool(cfg["defaultSandbox"]))
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+            return 1
         save_config(cfg)
         print(json.dumps({"ok": True, "config": cfg}))
         return 0

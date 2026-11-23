@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import struct
 import tempfile
@@ -10,6 +11,37 @@ from pathlib import Path
 from typing import Optional
 
 from compat_common import run_cmd, sanitize_desktop_value
+
+
+def split_windows_args(command_line: str) -> list[str]:
+    """Parse the argument string from a Windows shortcut."""
+    tokens = re.findall(r'[ \t]+|\\*"|[^ \t"\\]+|\\+', command_line)
+    argv: list[str] = []
+    parts: list[str] = []
+    quoted = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.endswith('"'):
+            slashes = len(token) - 1
+            parts.append("\\" * (slashes // 2))
+            if slashes % 2:
+                parts.append('"')
+            elif quoted and index + 1 < len(tokens) and tokens[index + 1] == '"':
+                parts.append('"')
+                index += 1
+            else:
+                quoted = not quoted
+        elif not quoted and not token.strip():
+            if parts:
+                argv.append("".join(parts))
+                parts.clear()
+        else:
+            parts.append(token)
+        index += 1
+    if parts:
+        argv.append("".join(parts))
+    return argv
 
 
 def inspect_pe(exe_path: Path) -> dict[str, object]:
@@ -33,11 +65,30 @@ def inspect_pe(exe_path: Path) -> dict[str, object]:
             info["target"] = parsed.get("target", "")
             info["arguments"] = parsed.get("arguments", "")
             info["product_name"] = parsed.get("description") or exe_path.stem
+        else:
+            info["error"] = "This file is not a readable Windows shortcut."
         return info
 
-    if suffix == ".msi":
-        info["product_name"] = exe_path.stem
+    try:
+        with exe_path.open("rb") as file:
+            if suffix == ".msi":
+                if file.read(8) != bytes.fromhex("d0cf11e0a1b11ae1"):
+                    info["error"] = "This file is not a Windows Installer package. Download the MSI again."
+                return info
+            header = file.read(64)
+            if len(header) != 64 or header[:2] != b"MZ":
+                raise ValueError
+            file.seek(struct.unpack_from("<I", header, 60)[0])
+            pe_header = file.read(6)
+            if len(pe_header) != 6 or pe_header[:4] != b"PE\x00\x00":
+                raise ValueError
+            machine = struct.unpack_from("<H", pe_header, 4)[0]
+    except (OSError, ValueError):
+        info["error"] = "This file is not a readable x86 or x64 Windows executable."
         return info
+    info["arch"] = {
+        0x014C: "x86", 0x8664: "x86_64", 0xAA64: "arm64", 0xA641: "arm64", 0xA64E: "arm64",
+    }.get(machine, "unknown")
 
     try:
         import pefile  # type: ignore
@@ -46,12 +97,6 @@ def inspect_pe(exe_path: Path) -> dict[str, object]:
         pe.parse_data_directories(
             directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]]
         )
-        info["arch"] = {
-            0x014C: "x86",
-            0x8664: "x86_64",
-            0xAA64: "arm64",
-        }.get(pe.FILE_HEADER.Machine, "unknown")
-
         meta: dict[str, str] = {}
         if hasattr(pe, "FileInfo"):
             for entry in pe.FileInfo:
@@ -155,11 +200,12 @@ def _read_cstr(data: bytes, offset: int, unicode: bool = False) -> str:
 def parse_lnk(lnk_path: Path) -> Optional[dict[str, str]]:
     """Parse a Microsoft Shell Link (.lnk) binary into target path, args, and icon."""
     try:
-        data = lnk_path.read_bytes()
+        with lnk_path.open("rb") as file:
+            data = file.read(1024 * 1024 + 1)
     except OSError:
         return None
 
-    if len(data) < 76:
+    if not 76 <= len(data) <= 1024 * 1024:
         return None
     header_size = _read_u32(data, 0)
     if header_size != 0x4C:
@@ -233,6 +279,7 @@ def parse_lnk(lnk_path: Path) -> Optional[dict[str, str]]:
         "target": sanitize_desktop_value(target),
         "description": sanitize_desktop_value(description),
         "working_dir": sanitize_desktop_value(working_dir),
+        "relative_path": sanitize_desktop_value(rel_path),
         "arguments": sanitize_desktop_value(arguments),
         "icon_location": sanitize_desktop_value(icon_location),
     }

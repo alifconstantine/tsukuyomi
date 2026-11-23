@@ -261,7 +261,7 @@ class CompatTests(unittest.TestCase):
             exe.parent.mkdir(parents=True)
             exe.write_bytes(b"MZ")
 
-            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data_home)}):
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data_home), "XDG_RUNTIME_DIR": tmp}):
                 with mock.patch("compat_common.refresh_desktop_caches"):
                     rc = tsukuyomi_win.main([
                         "export-desktop",
@@ -275,6 +275,11 @@ class CompatTests(unittest.TestCase):
                     txt = desktop.read_text(encoding="utf-8")
                     self.assertIn("X-Tsukuyomi-Runtime=windows", txt)
                     self.assertIn("StartupWMClass=demo.exe", txt)
+
+                    with tsukuyomi_win._installation_prefix("demo-app", fresh=False):
+                        self.assertEqual(tsukuyomi_win.main(["uninstall", "demo-app"]), 1)
+                        self.assertTrue(desktop.is_file())
+                        self.assertTrue(exe.is_file())
 
                     rc2 = tsukuyomi_win.main(["uninstall", "demo-app"])
                     self.assertEqual(rc2, 0)
@@ -314,13 +319,72 @@ class CompatTests(unittest.TestCase):
                 with mock.patch.object(tsukuyomi_win.shutil, "which", return_value="/usr/bin/bwrap"):
                     with mock.patch.object(tsukuyomi_win, "shared_dir", return_value=Path(tmp) / "shared"):
                         argv = tsukuyomi_win._build_bwrap_argv(
-                            ["wine", "x.exe"], env={}, prefix=prefix,
+                            ["wine", "x.exe"], env={"HOME": str(Path.home()), "TEST_HOST_CREDENTIAL": "unset-me"}, prefix=prefix,
                             ro_binds=[(Path.home(), Path("/mnt/x"))], cwd=None,
                         )
             joined = " ".join(argv)
             self.assertNotIn(str(rt / "bus"), joined)
             self.assertNotIn(f"--ro-bind {Path.home()} /mnt/x", joined)
+            self.assertNotIn("--dev-bind /dev/input", joined)
+            self.assertNotIn("--ro-bind /etc /etc", joined)
+            self.assertNotIn("pipewire-0-manager", joined)
+            self.assertNotIn("TEST_HOST_CREDENTIAL", joined)
+            self.assertIn("--clearenv", argv)
             self.assertEqual(argv[-2:], ["wine", "x.exe"])
+
+    def test_wine_maintenance_stays_in_sandbox_and_waits_for_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp)
+            env = {"WINEPREFIX": tmp}
+            with mock.patch.object(tsukuyomi_win, "_build_bwrap_argv", return_value=["bwrap", "setup"]) as sandbox, \
+                    mock.patch.object(tsukuyomi_win.subprocess, "run") as run:
+                tsukuyomi_win._run_prefix_setup(["wineboot", "--init"], env=env, prefix=prefix,
+                                                sandbox=True, timeout=120)
+            self.assertIn("wineserver -w", sandbox.call_args.args[0][2])
+            self.assertEqual(run.call_args.args[0], ["bwrap", "setup"])
+
+    def test_prefix_rejects_links_outside_its_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "prefix"
+            prefix.mkdir()
+            (prefix / ".cache").symlink_to(Path(tmp))
+            with self.assertRaises(ValueError):
+                tsukuyomi_win._prefix_path(prefix, ".cache")
+
+    def test_umu_cannot_claim_bubblewrap_isolation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Wine Staging"):
+            tsukuyomi_win._check_runner("umu", True)
+
+    def test_setup_exposes_only_selected_file_by_default(self) -> None:
+        root = Path("/mnt/installer")
+        src = Path.home() / "Downloads" / "App.exe"
+        self.assertEqual(tsukuyomi_win._installer_binds(src, root, False), [(src, root / src.name)])
+        with self.assertRaisesRegex(ValueError, "dedicated folder"):
+            tsukuyomi_win._installer_binds(src, root, True)
+
+    def test_windows_shortcut_arguments_round_trip(self) -> None:
+        argv = ["--profile", r'C:\\Program Files\\Vendor\\Profile', "", r'C:\\folder\\', 'a"b']
+        command = subprocess.list2cmdline(argv)
+        self.assertEqual(win_lnk.split_windows_args(command), argv)
+
+    def test_windows_file_headers_checked_before_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for name in ("App.exe", "App.msi", "App.lnk"):
+                path = base / name
+                path.write_bytes(b"<html>download error</html>")
+                self.assertIn("error", win_lnk.inspect_pe(path), name)
+
+    def test_windows_scan_finds_uppercase_and_local_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "demo"
+            user = os.environ.get("USER") or Path.home().name
+            exe = prefix / "drive_c" / "users" / user / "AppData" / "Local" / "Vendor" / "APP.EXE"
+            exe.parent.mkdir(parents=True)
+            before = tsukuyomi_win._snapshot_lnk_and_exe(prefix)
+            exe.write_bytes(b"MZ")
+            found = tsukuyomi_win.scan_shortcuts(prefix, *before)
+            self.assertEqual([item["exe"] for item in found], [str(exe)])
 
     def test_portable_pin_refuses_download_folder_bundle(self) -> None:
         self.assertFalse(tsukuyomi_win._is_safe_portable_bundle_dir(Path.home() / "Downloads"))
@@ -328,6 +392,8 @@ class CompatTests(unittest.TestCase):
             app_dir = Path(tmp) / "MyPortableApp"
             app_dir.mkdir()
             (app_dir / "app.exe").write_bytes(b"MZ")
+            for index in range(221):
+                (app_dir / f"resource-{index}.xml").touch()
             self.assertTrue(tsukuyomi_win._is_safe_portable_bundle_dir(app_dir))
 
     def test_file_uri_decoding(self) -> None:
