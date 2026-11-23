@@ -45,6 +45,22 @@ adopt_shipped_module window_rules \
     a8cb66ae0c5a583509dfe84b0d77dacd4d2afc94a68f773d90de81f2da1e11ed \
     d04ff344e30adb5dbc3ea9fbca926e2c49c6e765499f5029e693d43447ac529d
 
+migrate_browser_launch() {
+    local config="${XDG_CONFIG_HOME:-$HOME/.config}/ryoku/desktop.json"
+    local pending
+
+    [[ -f $config && ! -L $config ]] || return 0
+    jq -e '.desktop.apps.browser == "xdg-open about:blank"' "$config" >/dev/null 2>&1 || return 0
+    pending=$(mktemp -- "${config}.XXXXXXXX") || return 0
+    if jq --arg launch 'gtk-launch "$(xdg-settings get default-web-browser)"' \
+        '.desktop.apps.browser = $launch' "$config" > "$pending"; then
+        mv -fT -- "$pending" "$config"
+    fi
+    [[ ! -f $pending ]] || unlink -- "$pending"
+}
+
+migrate_browser_launch
+
 seed_picker_defaults() {
     local config="${XDG_CONFIG_HOME:-$HOME/.config}/ryoku/ryogami.json"
     local pending
