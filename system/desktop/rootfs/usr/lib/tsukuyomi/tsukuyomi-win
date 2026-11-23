@@ -284,6 +284,7 @@ def _apply_prefix_hardening_and_theme(
         "dxvk": dxvk,
         "dpi": dpi,
         "dark": dark,
+        "framePalette": 1,
     }
     meta_file = _prefix_path(prefix, ".tsukuyomi-prefix.json")
     prev_meta = read_json(meta_file, {})
@@ -347,7 +348,15 @@ def _apply_prefix_hardening_and_theme(
             '"Background"="18 14 14"\n'
             '"ButtonFace"="34 34 34"\n'
             '"ButtonText"="234 226 213"\n'
+            '"ButtonHilight"="45 45 45"\n'
+            '"ButtonLight"="39 39 39"\n'
+            '"ButtonShadow"="31 31 31"\n'
+            '"ButtonDkShadow"="25 25 25"\n'
+            '"ActiveBorder"="34 34 34"\n'
+            '"InactiveBorder"="34 34 34"\n'
+            '"WindowFrame"="48 48 48"\n'
             '"Menu"="28 28 28"\n'
+            '"MenuBar"="28 28 28"\n'
             '"MenuText"="234 226 213"\n'
             '"AppWorkSpace"="22 22 22"\n'
         )
@@ -359,7 +368,15 @@ def _apply_prefix_hardening_and_theme(
             '"Background"="236 238 242"\n'
             '"ButtonFace"="232 234 238"\n'
             '"ButtonText"="32 33 36"\n'
+            '"ButtonHilight"="241 242 245"\n'
+            '"ButtonLight"="237 239 242"\n'
+            '"ButtonShadow"="219 221 225"\n'
+            '"ButtonDkShadow"="208 211 215"\n'
+            '"ActiveBorder"="232 234 238"\n'
+            '"InactiveBorder"="232 234 238"\n'
+            '"WindowFrame"="201 204 210"\n'
             '"Menu"="244 245 247"\n'
+            '"MenuBar"="244 245 247"\n'
             '"MenuText"="32 33 36"\n'
             '"AppWorkSpace"="244 245 247"\n'
         )
