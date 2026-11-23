@@ -63,6 +63,12 @@ VIEWPORT_PRESETS: dict[str, tuple[int, int, int]] = {
     "fullhd": (1920, 1080, 260),
 }
 
+PHONE_VIEWPORTS: dict[str, tuple[int, int]] = {
+    "compact": (390, 844),
+    "standard": (480, 960),
+    "wide": (560, 1000),
+}
+
 
 def droid_root() -> Path:
     return xdg_data_home() / "tsukuyomi" / "android"
@@ -96,6 +102,7 @@ def default_config() -> dict[str, object]:
     return {
         "showSystemApps": False,
         "defaultMode": "phone",
+        "phoneSize": "auto",
         "gameResolution": "1280x720",
         "sharedDownloads": False,
         "autoSeedStores": True,
@@ -291,13 +298,25 @@ def _fit_viewport(width: int, height: int) -> tuple[int, int]:
     return round(width * factor), round(height * factor)
 
 
+def _phone_viewport(size: str) -> tuple[int, int]:
+    width, height = PHONE_VIEWPORTS.get(size, PHONE_VIEWPORTS["standard"])
+    monitor = detect_hypr_monitor()
+    scale = max(1.0, float(monitor["scale"]))
+    # Android lays out to the real viewport. Preserve usable text width on short
+    # monitors by trimming the viewport height instead of shrinking both axes.
+    height = min(height, round(int(monitor["height"]) * 0.86 / scale))
+    width = min(width, round(int(monitor["width"]) * 0.90 / scale), round(height * 0.80))
+    return max(1, width), max(1, height)
+
+
 def _init_argv() -> list[str]:
     gpu = detect_gpu_info()
     argv = ["pkexec", "/usr/lib/tsukuyomi/droid-system-init", "init", "--gpu", str(gpu["mode"])]
     if gpu.get("renderNode"):
         argv.extend(["--drm-node", str(gpu["renderNode"])])
-    if gpu["mode"] == "swiftshader":
-        width, height = _fit_viewport(432, 768)
+    phone_size = str(load_config()["phoneSize"])
+    if gpu["mode"] == "swiftshader" or phone_size in PHONE_VIEWPORTS:
+        width, height = _phone_viewport(phone_size)
         argv.extend(["--viewport", str(width), str(height)])
     return argv
 
@@ -500,7 +519,7 @@ def sync_desktop() -> dict[str, object]:
             f"X-Tsukuyomi-Package={pkg}\n"
             "Actions=LaunchPhone;LaunchGame;ForceStop;Uninstall;\n\n"
             "[Desktop Action LaunchPhone]\n"
-            "Name=Open in Phone Mode (Multi-Window)\n"
+            "Name=Open in Phone Mode\n"
             f"Exec={act_phone}\n\n"
             "[Desktop Action LaunchGame]\n"
             "Name=Open in Game Mode (16:9 Landscape)\n"
@@ -672,17 +691,18 @@ def cmd_launch(args: argparse.Namespace) -> int:
                 return 1
             return run_cmd(["waydroid", "app", "launch", pkg], timeout=20).returncode
 
-        # SwiftShader renders one bounded Android viewport. Forcing a desktop
-        # resize on individual multi-window surfaces leaves Android's original
-        # freeform task in a small subsurface inside the larger frame.
+        # SwiftShader and explicit phone sizes use a real Android viewport.
+        # Resizing a freeform Waydroid frame can leave the app at its old size.
+        phone_size = str(cfg["phoneSize"])
+        single_viewport = software or (mode == "phone" and phone_size in PHONE_VIEWPORTS)
         if mode == "landscape":
             w, h = _fit_viewport(1280, 720)
-        elif software:
-            w, h = _fit_viewport(432, 768)
+        elif single_viewport:
+            w, h = _phone_viewport(phone_size)
         else:
             w, h = 0, 0
         ft_pkg = pkg if (mode == "landscape" or rec.get("fakeTouch")) else ""
-        if not _ensure_container_and_session(multi_windows=not software, width=w, height=h, fake_touch_pkg=ft_pkg):
+        if not _ensure_container_and_session(multi_windows=not single_viewport, width=w, height=h, fake_touch_pkg=ft_pkg):
             return 1
         res = run_cmd(["waydroid", "app", "launch", pkg], timeout=20)
         return res.returncode
@@ -743,7 +763,7 @@ def cmd_resize(args: argparse.Namespace) -> int:
             try:
                 cls = str(json.loads(window.stdout).get("class") or "").lower()
                 if cls.startswith("waydroid.") or cls == "waydroid":
-                    geometry = f"hl.dsp.window.resize({{x = {win_w}, y = {win_h}, relative = false}})"
+                    geometry = f"hl.dsp.window.resize({{x = {win_w}, y = {win_h}, exact = true}})"
                     result = run_cmd(["hyprctl", "dispatch", geometry], timeout=3)
                     resized = result.returncode == 0 and result.stdout.strip() == "ok"
             except (ValueError, AttributeError):
@@ -833,6 +853,7 @@ def main(argv: list[str]) -> int:
     p_cfg = sub.add_parser("set-config")
     p_cfg.add_argument("--show-system-apps", choices=("true", "false"), default="")
     p_cfg.add_argument("--game-resolution", default="")
+    p_cfg.add_argument("--phone-size", choices=("auto", *PHONE_VIEWPORTS))
     p_cfg.add_argument("--shared-downloads", choices=("true", "false"), default="")
 
     args = parser.parse_args(argv)
@@ -904,6 +925,8 @@ def main(argv: list[str]) -> int:
             cfg["showSystemApps"] = args.show_system_apps == "true"
         if args.game_resolution and "x" in args.game_resolution:
             cfg["gameResolution"] = args.game_resolution
+        if args.phone_size:
+            cfg["phoneSize"] = args.phone_size
         if args.shared_downloads:
             enable = args.shared_downloads == "true"
             user = os.environ.get("USER") or Path.home().name

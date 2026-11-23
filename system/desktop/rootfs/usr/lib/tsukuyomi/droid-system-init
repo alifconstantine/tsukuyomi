@@ -101,14 +101,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     if args.gpu == "swiftshader":
         props["ro.hardware.gralloc"] = "default"
         props["ro.hardware.egl"] = "swiftshader"
-        if getattr(args, "viewport", None):
-            width, height = args.viewport
-            props["persist.waydroid.multi_windows"] = "false"
-            props["persist.waydroid.width"] = str(width)
-            props["persist.waydroid.height"] = str(height)
     else:
         props["ro.hardware.gralloc"] = "gbm"
         props["ro.hardware.egl"] = "mesa"
+    if args.viewport:
+        width, height = args.viewport
+        props["persist.waydroid.multi_windows"] = "false"
+        props["persist.waydroid.width"] = str(width)
+        props["persist.waydroid.height"] = str(height)
 
     _update_cfg_section("properties", props)
     if args.drm_node and DRM_NODE_RE.match(args.drm_node) and Path(args.drm_node).exists():
