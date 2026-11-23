@@ -139,22 +139,24 @@ class CompatTests(unittest.TestCase):
             self.assertEqual(tsukuyomi_droid._phone_viewport("compact"), (390, 688))
             self.assertEqual(tsukuyomi_droid._phone_viewport("wide"), (550, 688))
 
-    def test_antigravity_duplicate_launch_focuses_existing_window(self) -> None:
+    def test_duplicate_launch_focuses_existing_window_in_locked_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            exe = root / "Antigravity.exe"
+            prefix = root / "antigravity"
+            prefix.mkdir()
+            exe = prefix / "Antigravity.exe"
             exe.touch()
             args = tsukuyomi_win.argparse.Namespace(app_id="antigravity", extra_args=[])
             record = {"slug": "antigravity", "exe": str(exe)}
-            with (root / "tsukuyomi-win-launch-antigravity.lock").open("a") as lock, \
-                    mock.patch.object(tsukuyomi_win, "xdg_runtime_dir", return_value=root), \
+            with mock.patch.object(tsukuyomi_win, "xdg_runtime_dir", return_value=root), \
+                    mock.patch.object(tsukuyomi_win, "prefixes_dir", return_value=root), \
                     mock.patch.object(tsukuyomi_win, "read_json", return_value=record), \
-                    mock.patch.object(tsukuyomi_win, "_run_registered_app") as run, \
-                    mock.patch.object(tsukuyomi_win, "run_cmd") as dispatch:
-                tsukuyomi_win.fcntl.flock(lock, tsukuyomi_win.fcntl.LOCK_EX)
+                    mock.patch.object(tsukuyomi_win, "_launch_registered_app") as run, \
+                    mock.patch.object(tsukuyomi_win, "_focus_running_app", return_value=True) as focus, \
+                    tsukuyomi_win._installation_prefix("antigravity", fresh=False):
                 self.assertEqual(tsukuyomi_win.cmd_run(args), 0)
                 run.assert_not_called()
-                self.assertIn("hl.dsp.focus", dispatch.call_args.args[0][2])
+                focus.assert_called_once_with(prefix, exe)
 
     def test_validators_reject_injection(self) -> None:
         self.assertEqual(compat_common.validate_slug("notepad-plus-2"), "notepad-plus-2")
@@ -343,6 +345,50 @@ class CompatTests(unittest.TestCase):
             self.assertIn("wineserver -w", sandbox.call_args.args[0][2])
             self.assertEqual(run.call_args.args[0], ["bwrap", "setup"])
 
+    def test_setup_reports_success_with_autolaunched_app_still_running(self) -> None:
+        candidates = [{"exe": "/example/App.exe"}]
+        process = mock.Mock(stdout=io.BytesIO(b"0\n"))
+        with mock.patch.object(tsukuyomi_win.subprocess, "Popen", return_value=process) as popen, \
+                mock.patch.object(tsukuyomi_win, "scan_shortcuts", return_value=candidates), \
+                mock.patch.object(tsukuyomi_win.signal, "signal"):
+            result = tsukuyomi_win._run_sandbox_setup(
+                ["bwrap", "setup"], env={}, lock_fd=9, prefix=Path("/example"),
+                before_lnks={}, before_exes={},
+            )
+        self.assertEqual(result, candidates)
+        self.assertEqual(popen.call_args.kwargs["pass_fds"], (9,))
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        process.wait.assert_not_called()
+        process.terminate.assert_not_called()
+
+    def test_setup_waits_for_delegated_installer_when_no_app_found_yet(self) -> None:
+        candidates = [{"exe": "/example/App.exe"}]
+        process = mock.Mock(stdout=io.BytesIO(b"0\n"))
+        process.wait.return_value = 0
+        with mock.patch.object(tsukuyomi_win.subprocess, "Popen", return_value=process), \
+                mock.patch.object(tsukuyomi_win, "scan_shortcuts", side_effect=[[], candidates]), \
+                mock.patch.object(tsukuyomi_win.signal, "signal"):
+            result = tsukuyomi_win._run_sandbox_setup(
+                ["bwrap", "setup"], env={}, lock_fd=9, prefix=Path("/example"),
+                before_lnks={}, before_exes={},
+            )
+        process.wait.assert_called_once_with()
+        self.assertEqual(result, candidates)
+
+    def test_cancelling_pending_setup_stops_its_supervisor(self) -> None:
+        status = mock.MagicMock()
+        status.__enter__.return_value.readline.side_effect = tsukuyomi_win.InstallCancelled
+        process = mock.Mock(stdout=status)
+        process.poll.return_value = None
+        with mock.patch.object(tsukuyomi_win.subprocess, "Popen", return_value=process):
+            with self.assertRaises(tsukuyomi_win.InstallCancelled):
+                tsukuyomi_win._run_sandbox_setup(
+                    ["bwrap", "setup"], env={}, lock_fd=9, prefix=Path("/example"),
+                    before_lnks={}, before_exes={},
+                )
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
+
     def test_prefix_rejects_links_outside_its_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             prefix = Path(tmp) / "prefix"
@@ -406,7 +452,7 @@ class CompatTests(unittest.TestCase):
                 installed = tsukuyomi_win.prefixes_dir() / "demo"
                 installed.mkdir(parents=True)
                 with self.assertRaises(tsukuyomi_win.InstallCancelled):
-                    with tsukuyomi_win._installation_prefix("demo", fresh=True) as work:
+                    with tsukuyomi_win._installation_prefix("demo", fresh=True) as (work, _):
                         self.assertEqual(work.name, "demo-2")
                         raise tsukuyomi_win.InstallCancelled
                 self.assertTrue(installed.is_dir())

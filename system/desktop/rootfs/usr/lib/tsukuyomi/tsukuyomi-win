@@ -203,6 +203,67 @@ def _wait_for_wine_children(argv: list[str]) -> list[str]:
     return ["sh", "-c", '"$@"; status=$?; wineserver -w; exit "$status"', "tsukuyomi-wine", *argv]
 
 
+def _setup_with_status(argv: list[str]) -> list[str]:
+    # Report the installer's own exit first. Keep the namespace alive for
+    # delegated setup processes and any application opened by the installer.
+    return [
+        "sh", "-c",
+        '"$@" >&2; status=$?; printf "%s\\n" "$status"; exec >/dev/null; '
+        'wineserver -w; exit "$status"',
+        "tsukuyomi-wine-setup", *argv,
+    ]
+
+
+def _run_sandbox_setup(
+    argv: list[str], *, env: dict[str, str], lock_fd: int, prefix: Path,
+    before_lnks: dict[Path, int], before_exes: dict[Path, int],
+) -> list[dict[str, object]]:
+    # Bubblewrap must outlive the wizard if setup starts the installed app.
+    # The supervisor owns it and keeps the prefix locked until Wine is done.
+    supervisor = (
+        "trap 'exit 143' TERM\n"
+        '"$@" &\n'
+        "sandbox=$!\n"
+        "trap 'kill \"$sandbox\" 2>/dev/null; wait \"$sandbox\"; exit 143' TERM\n"
+        'wait "$sandbox"'
+    )
+    command = ["sh", "-c", supervisor, "tsukuyomi-wine-supervisor", *argv]
+    with tempfile.TemporaryFile() as diagnostics:
+        process = subprocess.Popen(
+            command, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=diagnostics, start_new_session=True, pass_fds=(lock_fd,),
+        )
+        try:
+            with process.stdout as status:
+                line = status.readline(16).strip()
+            code = int(line) if line.isdigit() else (process.wait() or 1)
+            if code != 0:
+                raise subprocess.CalledProcessError(code, argv)
+            candidates = scan_shortcuts(prefix, before_lnks, before_exes)
+            if not candidates:
+                # A bootstrapper can exit before its real installer writes
+                # the application. Preserve its existing wait and rescan.
+                code = process.wait()
+                if code != 0:
+                    raise subprocess.CalledProcessError(code, argv)
+                candidates = scan_shortcuts(prefix, before_lnks, before_exes)
+            # Completion won any subsequent race with Cancel in the wizard.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            return candidates
+        except BaseException as exc:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            if isinstance(exc, subprocess.CalledProcessError):
+                diagnostics.seek(max(0, diagnostics.seek(0, os.SEEK_END) - 4096))
+                sys.stderr.write(diagnostics.read().decode(errors="replace"))
+            raise
+
+
 def _apply_prefix_hardening_and_theme(
     prefix: Path,
     *,
@@ -582,6 +643,7 @@ def _build_bwrap_argv(
     prefix: Path,
     ro_binds: list[tuple[Path, Path]],
     cwd: Optional[Path],
+    lock_fd: int | None = None,
 ) -> list[str]:
     if not shutil.which("bwrap"):
         raise ValueError("Windows app isolation is unavailable. Install the Tsukuyomi compatibility packages.")
@@ -598,6 +660,8 @@ def _build_bwrap_argv(
         "--clearenv",
         "--setenv", "PATH", "/usr/bin:/bin",
     ]
+    if lock_fd is not None:
+        bwrap.extend(["--sync-fd", str(lock_fd)])
     session_vars = {
         "USER", "LOGNAME", "HOME", "LANG", "LANGUAGE", "DISPLAY", "WAYLAND_DISPLAY",
         "XAUTHORITY", "XDG_RUNTIME_DIR", "WINEPREFIX", "WINEARCH", "WINEDEBUG",
@@ -726,6 +790,10 @@ class InstallCancelled(Exception):
     pass
 
 
+class PrefixBusy(ValueError):
+    pass
+
+
 def _interrupt_install(_signum: int, _frame: object) -> None:
     raise InstallCancelled
 
@@ -750,9 +818,9 @@ def _installation_prefix(slug: str, *, fresh: bool):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise ValueError("Another Windows app or setup is using this environment. Close it and try again.") from exc
+            raise PrefixBusy("Another Windows app or setup is using this environment. Close it and try again.") from exc
         try:
-            yield prefix
+            yield prefix, lock.fileno()
         except (Exception, KeyboardInterrupt):
             if fresh:
                 if (prefix / "system.reg").is_file():
@@ -837,9 +905,9 @@ def _install(args: argparse.Namespace) -> int:
         slug = slugify(args.slug or app_name, "win-app")
 
     fresh = mode == "isolated" or (mode == "portable" and args.pin_portable)
-    with _installation_prefix(slug, fresh=fresh) as prefix:
+    with _installation_prefix(slug, fresh=fresh) as (prefix, lock_fd):
         return _install_in_prefix(
-            args, src, lnk_extra_args, app_name, prefix.name,
+            args, src, lnk_extra_args, app_name, prefix.name, lock_fd=lock_fd,
             sandbox=sandbox, wayland=wayland, dxvk=dxvk, runner=runner,
             antigravity_setup=pe_info["product_name"] == "Antigravity" and pe_info["company"] == "Google",
         )
@@ -847,7 +915,7 @@ def _install(args: argparse.Namespace) -> int:
 
 def _install_in_prefix(
     args: argparse.Namespace, src: Path, lnk_extra_args: list[str], app_name: str, slug: str, *,
-    sandbox: bool, wayland: bool, dxvk: bool, runner: str, antigravity_setup: bool,
+    lock_fd: int, sandbox: bool, wayland: bool, dxvk: bool, runner: str, antigravity_setup: bool,
 ) -> int:
     mode = args.mode
     prefix = _ensure_prefix(
@@ -906,7 +974,6 @@ def _install_in_prefix(
         return 0
 
     e_drive = prefix / "dosdevices" / "e:"
-    use_bwrap_install = sandbox
     if runner == "wine" and antigravity_setup:
         # Google's NSIS build treats the Wine PowerShell stub's exit 0 as
         # proof that Get-CimInstance found a process. Use its tasklist path.
@@ -914,30 +981,28 @@ def _install_in_prefix(
     base_bin = ["umu-run"] if runner == "umu" else ["wine"]
     if src.suffix.lower() == ".msi":
         base_bin += ["msiexec", "/i"]
-    if use_bwrap_install:
+    if sandbox:
         mount_root = Path("/mnt/tsukuyomi-src")
         ro_binds = _installer_binds(src, mount_root, args.share_installer_folder)
         target_arg = f"E:\\{src.name}"
-        # Setup launchers can exit before their real installer starts writing.
-        # Keep it alive in the same PID namespace and scan only after it exits.
         argv = _build_bwrap_argv(
-            _wait_for_wine_children(base_bin + [target_arg] + lnk_extra_args),
-            env=env, prefix=prefix, ro_binds=ro_binds, cwd=None,
+            _setup_with_status(base_bin + [target_arg] + lnk_extra_args),
+            env=env, prefix=prefix, ro_binds=ro_binds, cwd=None, lock_fd=lock_fd,
         )
         e_drive.unlink(missing_ok=True)
         e_drive.symlink_to(mount_root)
-        popen_cwd = None
+        try:
+            candidates = _run_sandbox_setup(
+                argv, env=env, lock_fd=lock_fd, prefix=prefix,
+                before_lnks=before_lnks, before_exes=before_exes,
+            )
+        finally:
+            e_drive.unlink(missing_ok=True)
     else:
         argv = base_bin + [str(src)] + lnk_extra_args
-        popen_cwd = str(src.parent)
-
-    try:
-        subprocess.run(argv, env=env, cwd=popen_cwd, stdout=sys.stderr, check=True)
-    finally:
-        if use_bwrap_install:
-            e_drive.unlink(missing_ok=True)
-
-    candidates = scan_shortcuts(prefix, before_lnks, before_exes)
+        subprocess.run(argv, env=env, cwd=src.parent, stdout=sys.stderr, check=True)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        candidates = scan_shortcuts(prefix, before_lnks, before_exes)
     for candidate in candidates:
         candidate.update(runner=runner, wayland=wayland, sandbox=sandbox, dxvk=dxvk)
     print(
@@ -1007,6 +1072,35 @@ def _convert_arg_for_wine(prefix: Path, arg: str, env: dict[str, str]) -> str:
     return arg
 
 
+def _focus_running_app(prefix: Path, exe: Path) -> bool:
+    result = run_cmd(["hyprctl", "clients", "-j"], timeout=3)
+    if result.returncode != 0:
+        return False
+    try:
+        windows = json.loads(result.stdout)
+    except ValueError:
+        return False
+    if not isinstance(windows, list):
+        return False
+    expected_prefix = os.fsencode(f"WINEPREFIX={prefix}")
+    for window in windows:
+        if str(window.get("initialClass", "")).casefold() != exe.name.casefold():
+            continue
+        pid = window.get("pid")
+        address = str(window.get("address", ""))
+        if not isinstance(pid, int) or pid <= 0 or not re.fullmatch(r"0x[\da-fA-F]+", address):
+            continue
+        try:
+            with Path(f"/proc/{pid}/environ").open("rb") as process_env:
+                if expected_prefix not in process_env.read(131072).split(b"\0"):
+                    continue
+        except OSError:
+            continue
+        focused = run_cmd(["hyprctl", "dispatch", f'hl.dsp.focus({{window = "address:{address}"}})'], timeout=3)
+        return focused.returncode == 0
+    return False
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     app_id = validate_slug(args.app_id)
     rec = read_json(apps_dir() / f"{app_id}.json")
@@ -1021,28 +1115,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"tsukuyomi-win: executable missing: {exe}", file=sys.stderr)
         return 1
 
-    if (exe.name.casefold() == "antigravity.exe" and rec.get("sandbox", True)
-            and (rec.get("runner") or "wine") == "wine" and not args.extra_args):
-        # Each Bubblewrap launch has its own Wine server. Two clicks therefore
-        # bypass Antigravity's own single-instance check.
-        runtime = xdg_runtime_dir()
-        runtime.mkdir(parents=True, exist_ok=True)
-        with (runtime / f"tsukuyomi-win-launch-{app_id}.lock").open("a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                run_cmd(
-                    ["hyprctl", "dispatch", 'hl.dsp.focus({ window = "class:(?i)^antigravity[.]exe$" })'],
-                    timeout=3,
-                )
-                return 0
-            return _run_registered_app(args, rec, prefix, exe)
-    return _run_registered_app(args, rec, prefix, exe)
-
-
-def _run_registered_app(args: argparse.Namespace, rec: dict, prefix: Path, exe: Path) -> int:
-    with _installation_prefix(prefix.name, fresh=False):
-        return _launch_registered_app(args, rec, prefix, exe)
+    try:
+        with _installation_prefix(slug, fresh=False):
+            return _launch_registered_app(args, rec, prefix, exe)
+    except PrefixBusy:
+        if not args.extra_args and _focus_running_app(prefix, exe):
+            return 0
+        raise
 
 
 def _launch_registered_app(args: argparse.Namespace, rec: dict, prefix: Path, exe: Path) -> int:
@@ -1182,7 +1261,7 @@ def cmd_tool(args: argparse.Namespace, tool: str) -> int:
     if not shutil.which(command[0]):
         return 1
     try:
-        with _installation_prefix(slug, fresh=False) as prefix:
+        with _installation_prefix(slug, fresh=False) as (prefix, _):
             env = _wine_env(prefix, wayland=bool(rec.get("wayland", False)), dxvk=bool(rec.get("dxvk", True)))
             if rec.get("sandbox", True):
                 command = _build_bwrap_argv(
@@ -1203,7 +1282,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
         return 1
     slug = validate_slug(str(rec["slug"]))
     try:
-        with _installation_prefix(slug, fresh=False) as prefix:
+        with _installation_prefix(slug, fresh=False) as (prefix, _):
             _remove_registered_app(app_id, rec_path, prefix)
     except (OSError, ValueError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}))
