@@ -144,9 +144,9 @@ def _wine_env(
     env["WINE_NTSYNC"] = "1"
     overrides = ["winemenubuilder.exe=d"]
     if dxvk:
-        overrides.append("d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=n,b")
+        overrides.append("d3d8,d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=n,b")
     else:
-        overrides.append("d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=b")
+        overrides.append("d3d8,d3d9,d3d10core,d3d11,dxgi,d3d12,d3d12core=b")
     for directory, dll in (("mono", "mscoree"), ("gecko", "mshtml")):
         if not any(Path("/usr/share/wine", directory).glob("*")):
             overrides.append(f"{dll}=")
@@ -276,7 +276,9 @@ def _apply_prefix_hardening_and_theme(
 ) -> None:
     mon = detect_hypr_monitor()
     scale = max(1.0, min(3.0, float(mon.get("scale", 1.0))))
-    dpi = int(round(96 * scale))
+    # Native winewayland.drv applies compositor fractional/HiDPI scaling itself;
+    # only override LogPixels under XWayland (force_zero_scaling = true).
+    dpi = 96 if wayland else int(round(96 * scale))
     dark = not light_setup and detect_theme_dark()
 
     state_sig = {
@@ -475,7 +477,8 @@ def _snapshot_lnk_and_exe(prefix: Path) -> tuple[dict[Path, int], dict[Path, int
     user = os.environ.get("USER") or Path.home().name
     profile = drive / "users" / user
     desktop = profile / "Desktop"
-    roots = [profile / "AppData" / "Local", profile / "AppData" / "Roaming", desktop]
+    public_desktop = drive / "users" / "Public" / "Desktop"
+    roots = [profile / "AppData" / "Local", profile / "AppData" / "Roaming", desktop, public_desktop]
     if drive.is_dir():
         roots.extend(p for p in drive.iterdir() if p.name.casefold() not in ("windows", "users", "perflogs"))
     skip = {"cache", "code cache", "gpucache", "temp", "package cache", "node_modules"}
@@ -499,7 +502,7 @@ def _snapshot_lnk_and_exe(prefix: Path) -> tuple[dict[Path, int], dict[Path, int
                     except FileNotFoundError:
                         continue
         return found
-    return snapshot(_start_menu_dirs(prefix) + [desktop], ".lnk"), snapshot(roots, ".exe")
+    return snapshot(_start_menu_dirs(prefix) + [desktop, public_desktop], ".lnk"), snapshot(roots, ".exe")
 
 
 def _win_to_prefix_path(prefix: Path, win_path: str) -> Optional[Path]:
@@ -548,9 +551,11 @@ def scan_shortcuts(prefix: Path, before_lnks: dict[Path, int], before_exes: dict
             continue
         if lnk not in new_lnks and resolved not in new_exes:
             continue
-        if _is_clutter_exe(resolved) or "uninstall" in lnk.stem.lower():
+        raw_args = parsed.get("arguments", "")
+        is_squirrel_launch = resolved.stem.lower() == "update" and "--processstart" in raw_args.lower()
+        if (not is_squirrel_launch and _is_clutter_exe(resolved)) or "uninstall" in lnk.stem.lower():
             continue
-        key = str(resolved).lower()
+        key = f"{str(resolved).lower()}|{raw_args.strip().lower()}" if is_squirrel_launch else str(resolved).lower()
         if key in seen_targets:
             continue
         seen_targets.add(key)
@@ -672,6 +677,9 @@ def _build_bwrap_argv(
         "--die-with-parent",
         "--new-session",
         "--unshare-pid",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+        "--cap-drop", "ALL",
         "--dev", "/dev",
         "--proc", "/proc",
         "--tmpfs", "/tmp",
@@ -685,6 +693,9 @@ def _build_bwrap_argv(
         "USER", "LOGNAME", "HOME", "LANG", "LANGUAGE", "DISPLAY", "WAYLAND_DISPLAY",
         "XAUTHORITY", "XDG_RUNTIME_DIR", "WINEPREFIX", "WINEARCH", "WINEDEBUG",
         "WINE_NTSYNC", "WINEDLLOVERRIDES", "DRI_PRIME",
+        "XCURSOR_THEME", "XCURSOR_SIZE", "MESA_VK_DEVICE_SELECT", "VK_ICD_FILENAMES",
+        "__NV_PRIME_RENDER_OFFLOAD", "__GLX_VENDOR_LIBRARY_NAME", "__VK_LAYER_NV_optimus",
+        "LIBGL_ALWAYS_SOFTWARE", "TSUKUYOMI_SOFTWARE_RENDERER",
     }
     for key, value in env.items():
         if key in session_vars or key.startswith("LC_"):
@@ -706,7 +717,10 @@ def _build_bwrap_argv(
     if Path("/var/cache/fontconfig").is_dir():
         bwrap.extend(["--ro-bind", "/var/cache/fontconfig", "/var/cache/fontconfig"])
 
-    for dev_path in ("/dev/dri", "/dev/ntsync", "/dev/snd"):
+    rt = xdg_runtime_dir()
+    has_audio_sock = rt.is_dir() and any((rt / s).exists() for s in ("pipewire-0", "pulse"))
+    dev_paths = ("/dev/dri", "/dev/ntsync") if has_audio_sock else ("/dev/dri", "/dev/ntsync", "/dev/snd")
+    for dev_path in dev_paths:
         if Path(dev_path).exists():
             bwrap.extend(["--dev-bind", dev_path, dev_path])
     for nv in sorted(Path("/dev").glob("nvidia*")):
@@ -721,7 +735,6 @@ def _build_bwrap_argv(
     if xauth and Path(xauth).is_file():
         bwrap.extend(["--ro-bind", xauth, xauth])
 
-    rt = xdg_runtime_dir()
     if rt.is_dir():
         bwrap.extend(["--dir", str(rt)])
         # Explicitly exclude D-Bus session bus to prevent host sandbox escapes.
@@ -734,6 +747,9 @@ def _build_bwrap_argv(
 
     home = Path.home()
     bwrap.extend(["--dir", str(home)])
+    user_fonts = home / ".local" / "share" / "fonts"
+    if user_fonts.is_dir():
+        bwrap.extend(["--ro-bind", str(user_fonts), str(user_fonts)])
     pfx_cache = _prefix_path(prefix, ".cache")
     pfx_cache.mkdir(parents=True, exist_ok=True)
     bwrap.extend(["--bind", str(pfx_cache), str(home / ".cache")])
@@ -1106,20 +1122,28 @@ def _focus_running_app(prefix: Path, exe: Path) -> bool:
     if not isinstance(windows, list):
         return False
     expected_prefix = os.fsencode(f"WINEPREFIX={prefix}")
+    class_matches: list[str] = []
     for window in windows:
         if str(window.get("initialClass", "")).casefold() != exe.name.casefold():
             continue
-        pid = window.get("pid")
         address = str(window.get("address", ""))
-        if not isinstance(pid, int) or pid <= 0 or not re.fullmatch(r"0x[\da-fA-F]+", address):
+        if not re.fullmatch(r"0x[\da-fA-F]+", address):
+            continue
+        class_matches.append(address)
+        pid = window.get("pid")
+        if not isinstance(pid, int) or pid <= 0:
             continue
         try:
             with Path(f"/proc/{pid}/environ").open("rb") as process_env:
-                if expected_prefix not in process_env.read(131072).split(b"\0"):
-                    continue
+                if expected_prefix in process_env.read(131072).split(b"\0"):
+                    focused = run_cmd(["hyprctl", "dispatch", f'hl.dsp.focus({{window = "address:{address}"}})'], timeout=3)
+                    return focused.returncode == 0
         except OSError:
             continue
-        focused = run_cmd(["hyprctl", "dispatch", f'hl.dsp.focus({{window = "address:{address}"}})'], timeout=3)
+    # Inside bwrap --unshare-pid, XWayland's _NET_WM_PID is namespace-local and
+    # unreadable on the host; focus the unique window matching initialClass.
+    if len(class_matches) == 1:
+        focused = run_cmd(["hyprctl", "dispatch", f'hl.dsp.focus({{window = "address:{class_matches[0]}"}})'], timeout=3)
         return focused.returncode == 0
     return False
 
@@ -1166,7 +1190,8 @@ def _launch_registered_app(args: argparse.Namespace, rec: dict, prefix: Path, ex
     extra_args = shlex.split(str(rec.get("args") or ""))
     # Electron's accelerated compositor can repaint only part of the window
     # and leave its controls unresponsive on software-rendered XWayland.
-    if (antigravity and runner == "wine" and not wayland
+    is_electron = antigravity or (exe.parent / "resources" / "app.asar").exists() or (exe.parent / "chrome_elf.dll").exists()
+    if (is_electron and runner == "wine" and not wayland
             and env.get("TSUKUYOMI_SOFTWARE_RENDERER") == "1"
             and "--disable-gpu" not in extra_args and "--disable-gpu" not in args.extra_args):
         extra_args.append("--disable-gpu")
@@ -1330,6 +1355,42 @@ def _remove_registered_app(app_id: str, rec_path: Path, prefix: Path) -> None:
     print(json.dumps({"ok": True, "removed": app_id, "prefixRemoved": not keep_prefix}))
 
 
+def cmd_force_stop(args: argparse.Namespace) -> int:
+    app_id = validate_slug(args.app_id)
+    rec_path = apps_dir() / f"{app_id}.json"
+    rec = read_json(rec_path)
+    if not isinstance(rec, dict):
+        print(json.dumps({"ok": False, "error": f"App not found: {app_id}"}))
+        return 1
+    slug = validate_slug(str(rec["slug"]))
+    prefix = prefixes_dir() / slug
+    env = _wine_env(prefix, headless=True)
+    if shutil.which("wineserver"):
+        run_cmd(["wineserver", "-k"], env=env, timeout=10)
+    # Also terminate any host processes whose environ holds this WINEPREFIX (e.g. bwrap supervisor).
+    marker = os.fsencode(f"WINEPREFIX={prefix}")
+    my_pid = os.getpid()
+    killed = 0
+    for proc_dir in Path("/proc").iterdir():
+        if not proc_dir.name.isdigit():
+            continue
+        pid = int(proc_dir.name)
+        if pid == my_pid:
+            continue
+        try:
+            raw_env = (proc_dir / "environ").read_bytes()
+        except OSError:
+            continue
+        if marker in raw_env.split(b"\0"):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed += 1
+            except OSError:
+                pass
+    print(json.dumps({"ok": True, "stopped": app_id, "terminated": killed}))
+    return 0
+
+
 def parse_bool_str(v: str) -> bool:
     low = v.strip().lower()
     if low in ("1", "true", "yes", "on"):
@@ -1382,7 +1443,7 @@ def main(argv: list[str]) -> int:
     p_def.add_argument("--sandbox", type=parse_bool_str, default=None)
     p_def.add_argument("--dxvk", type=parse_bool_str, default=None)
 
-    for simple in ("toggle-wayland", "open-prefix", "winecfg", "winetricks", "uninstall"):
+    for simple in ("toggle-wayland", "open-prefix", "winecfg", "winetricks", "force-stop", "uninstall"):
         sp = sub.add_parser(simple)
         sp.add_argument("app_id")
 
@@ -1399,7 +1460,7 @@ def main(argv: list[str]) -> int:
         if info.get("error"):
             print(json.dumps(info))
             return 1
-        icon_tmp = xdg_runtime_dir() / "tsukuyomi-win-preview.png"
+        icon_tmp = xdg_runtime_dir() / f"tsukuyomi-win-preview-{os.getpid()}.png"
         icon_tmp.unlink(missing_ok=True)
         if extract_exe_icon_png(src, icon_tmp):
             info["icon_preview"] = str(icon_tmp)
@@ -1412,13 +1473,15 @@ def main(argv: list[str]) -> int:
     if args.cmd == "export-desktop":
         return cmd_export_desktop(args)
     if args.cmd == "run":
+        err_detail = "Check the app's settings in Tsukuyomi Hub → Compatibility."
         try:
             result = cmd_run(args)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            err_detail = str(exc) or err_detail
             print(f"tsukuyomi-win: {exc}", file=sys.stderr)
             result = 1
         if result != 0 and shutil.which("notify-send"):
-            run_cmd(["notify-send", "Windows app could not open", "Check the app's settings in Tsukuyomi Hub → Compatibility."], timeout=3)
+            run_cmd(["notify-send", "-a", "Tsukuyomi", "Windows app could not open", err_detail], timeout=3)
         return result
     if args.cmd == "list":
         return cmd_list(args)
@@ -1448,6 +1511,8 @@ def main(argv: list[str]) -> int:
         return cmd_open_prefix(args)
     if args.cmd in ("winecfg", "winetricks"):
         return cmd_tool(args, args.cmd)
+    if args.cmd == "force-stop":
+        return cmd_force_stop(args)
     if args.cmd == "uninstall":
         return cmd_uninstall(args)
     return 1
