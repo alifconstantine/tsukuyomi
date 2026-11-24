@@ -130,6 +130,28 @@ class CompatTests(unittest.TestCase):
             self.assertNotIn("ShowSystray", imports[0])
             self.assertIn('"ShowSystray"=dword:00000000', imports[1])
 
+    def test_windows_existing_prefix_updates_cleartype_contrast(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "pfx"
+            drive_c = prefix / "drive_c"
+            drive_c.mkdir(parents=True)
+            meta_file = prefix / ".tsukuyomi-prefix.json"
+            old_state = {"sandbox": True, "wayland": True, "dxvk": False, "dpi": 96, "dark": True, "framePalette": 1}
+            meta_file.write_text(json.dumps({"appliedState": old_state}))
+
+            def verify_registry_import(argv, **_kwargs):
+                reg_file = drive_c / argv[-1].removeprefix("C:\\")
+                self.assertIn('"FontSmoothingGamma"=dword:00000578', reg_file.read_text())
+
+            with mock.patch.object(tsukuyomi_win, "detect_hypr_monitor", return_value={"scale": 1}), \
+                 mock.patch.object(tsukuyomi_win, "detect_theme_dark", return_value=True), \
+                 mock.patch.object(tsukuyomi_win, "_run_prefix_setup", side_effect=verify_registry_import) as run_setup:
+                tsukuyomi_win._apply_prefix_hardening_and_theme(prefix, sandbox=True, wayland=True, dxvk=False)
+                tsukuyomi_win._apply_prefix_hardening_and_theme(prefix, sandbox=True, wayland=True, dxvk=False)
+
+            run_setup.assert_called_once()
+            self.assertEqual(json.loads(meta_file.read_text())["appliedState"]["framePalette"], 2)
+
     def test_phone_viewport_preserves_width_on_short_display(self) -> None:
         with mock.patch.object(
             tsukuyomi_droid, "detect_hypr_monitor",

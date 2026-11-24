@@ -297,7 +297,7 @@ def _apply_prefix_hardening_and_theme(
         "dxvk": dxvk,
         "dpi": dpi,
         "dark": dark,
-        "framePalette": 1,
+        "framePalette": 2,
     }
     meta_file = _prefix_path(prefix, ".tsukuyomi-prefix.json")
     prev_meta = read_json(meta_file, {})
@@ -403,6 +403,8 @@ def _apply_prefix_hardening_and_theme(
         f'"LogPixels"=dword:{dpi:08x}\n'
         '"FontSmoothing"="2"\n'
         '"FontSmoothingType"=dword:00000002\n'
+        # The Windows default is 1400. Wine can return zero to Java AWT.
+        '"FontSmoothingGamma"=dword:00000578\n'
         '"FontSmoothingOrientation"=dword:00000001\n\n'
         "[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\ThemeManager]\n"
         '"ThemeActive"="0"\n\n'
