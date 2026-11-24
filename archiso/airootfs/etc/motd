@@ -1,6 +1,6 @@
 
   TSUKUYOMI OS — Live Installer
-  Base: CachyOS + Hyprland + end-4 (illogical-impulse)
+  Base: CachyOS + Hyprland + Ryoku
 
   • Re-launch TUI installer : tsukuyomi-tui
   • Dry-run test            : tsukuyomi-tui --dry-run

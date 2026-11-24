@@ -1,5 +1,5 @@
 # Tsukuyomi OS live installer ISO packages (Ryoku-style minimal cage + foot + TUI).
-# Target desktop packages (Hyprland, end-4, SDDM, Plymouth, etc.) are installed
+# Target desktop packages (Hyprland, Ryoku, SDDM, Plymouth, etc.) are installed
 # to /mnt by tsukuyomi-install from /usr/share/tsukuyomi/packages/.
 
 base

@@ -12,6 +12,14 @@ Singleton {
     function load() {
         var data = {};
         try { data = JSON.parse(cfg.text()) || {}; } catch (e) {}
+        if (data && typeof data.use24HourClock === "boolean") {
+            root.is24h = data.use24HourClock;
+            return;
+        }
+        if (data && data.clock && typeof data.clock.use24h === "boolean") {
+            root.is24h = data.clock.use24h;
+            return;
+        }
         var fmt = data && data.time && typeof data.time.format === "string"
             ? data.time.format.trim() : "";
         if (fmt === "") {
@@ -23,7 +31,7 @@ Singleton {
 
     FileView {
         id: cfg
-        path: (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/illogical-impulse/config.json"
+        path: (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config")) + "/ryoku/shell.json"
         blockLoading: true
         watchChanges: true
         printErrors: false

@@ -36,16 +36,18 @@ file_permissions=(
 
 # mkarchiso copies airootfs/ with --no-preserve=ownership,mode; preserve 0755 on all
 # shell/python helpers in /etc/skel/.config and Tsukuyomi runtime asset dirs.
+_tsukuyomi_profile_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+_tsukuyomi_airootfs="${_tsukuyomi_profile_dir}/airootfs"
 while IFS= read -r -d '' _tsukuyomi_exec; do
-  file_permissions["/${_tsukuyomi_exec#airootfs/}"]="0:0:755"
+  file_permissions["/${_tsukuyomi_exec#${_tsukuyomi_airootfs}/}"]="0:0:755"
 done < <(
   find \
-    airootfs/etc/skel/.config \
-    airootfs/usr/share/tsukuyomi/boot \
-    airootfs/usr/share/tsukuyomi/fastfetch \
-    airootfs/usr/share/tsukuyomi/lockscreen \
-    airootfs/usr/share/tsukuyomi/sddm \
+    "${_tsukuyomi_airootfs}/etc/skel/.config" \
+    "${_tsukuyomi_airootfs}/usr/share/tsukuyomi/boot" \
+    "${_tsukuyomi_airootfs}/usr/share/tsukuyomi/fastfetch" \
+    "${_tsukuyomi_airootfs}/usr/share/tsukuyomi/lockscreen" \
+    "${_tsukuyomi_airootfs}/usr/share/tsukuyomi/sddm" \
     -type f \( -perm -111 -o -name '*.sh' -o -name '*.py' \) \
     -print0 2>/dev/null
 )
-unset _tsukuyomi_exec
+unset _tsukuyomi_exec _tsukuyomi_profile_dir _tsukuyomi_airootfs

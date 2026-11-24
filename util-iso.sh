@@ -58,9 +58,7 @@ fetch_cachyos_mirrorlist() {
 }
 
 generate_environment() {
-    cat << 'EOF' > "${src_dir}/archiso/airootfs/etc/environment"
-ZPOOL_VDEV_NAME_PATH=1
-EOF
+    : > "${src_dir}/archiso/airootfs/etc/environment"
 }
 
 generate_version_tag() {
@@ -147,8 +145,7 @@ run_build() {
     mkdir -p "${work_dir}"
     cp -a --reflink=auto "${src_dir}/archiso" "${work_dir}/archiso"
     if $online_only; then
-        rm -rf -- "${work_dir}/archiso/airootfs/usr/share/tsukuyomi/offline" \
-            "${work_dir}/archiso/airootfs/usr/share/tsukuyomi/shell/python"
+        rm -rf -- "${work_dir}/archiso/airootfs/usr/share/tsukuyomi/offline"
     fi
 
     msg "Start [Build ISO]"
@@ -156,7 +153,7 @@ run_build() {
     mkdir -p "$outFolder/$_profile"
     cd "${work_dir}/archiso/"
     sudo mkarchiso -v -w "${work_dir}" -o "$outFolder/$_profile" "${work_dir}/archiso/"
-    sudo chown -R "$USER" "$outFolder"
+    sudo chown -R "${SUDO_USER:-$USER}" "$outFolder"
 
     cp "${work_dir}/iso/tsukuyomi/pkglist.x86_64.txt" "$outFolder/$_profile/$(gen_iso_fn).pkgs.txt" 2>/dev/null || true
     local built_iso="$outFolder/$_profile/tsukuyomi-$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y.%m.%d)-x86_64.iso"
