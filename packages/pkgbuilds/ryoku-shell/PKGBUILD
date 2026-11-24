@@ -1,6 +1,6 @@
 pkgname=ryoku-shell
 pkgver=1.0.9.r6109.g08ff328
-pkgrel=2
+pkgrel=3
 epoch=1
 pkgdesc='Tsukuyomi shell IPC daemon and Quickshell supervisor'
 arch=('x86_64')

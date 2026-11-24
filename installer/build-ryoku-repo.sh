@@ -58,14 +58,16 @@ cp -a "$work/upstream/usr/lib/qt6/qml/Ryoku" "$payload/usr/lib/qt6/qml/"
 mv "$work/profile/.config/"{hypr,quickshell,matugen} "$data/config/"
 cp -a "$work/profile/." "$skel/"
 cp -a "$data/config/"{hypr,matugen,qt6ct} "$skel/.config/"
-for module in binds decoration perf_saver window_rules; do
+for module in autostart binds decoration env perf_saver window_rules; do
     ln -sfn "/usr/share/ryoku/config/hypr/modules/$module.lua" "$skel/.config/hypr/modules/$module.lua"
 done
+ln -sfn /usr/share/ryoku/config/hypr/xdph.conf "$skel/.config/hypr/xdph.conf"
 ln -s /usr/share/ryoku/config/quickshell "$skel/.config/quickshell"
 install -Dm644 "$shell_src/ryoku/tsukuyomi-store.desktop" "$payload/usr/share/applications/tsukuyomi-store.desktop"
 
 for helper in ryostore ryostore-install ryoku-plugins-place ryoku-monitor ryoku-wm-hyprland ryoku-workspace ryoku-bt-audio \
-    ryoku-bluetooth-power ryoku-bluetooth-reset ryoku-media ryoku-volume ryoku-gpu ryoku-gpu-detect; do
+    ryoku-bluetooth-power ryoku-bluetooth-reset ryoku-media ryoku-volume ryoku-gpu ryoku-gpu-detect ryoku-clamshell \
+    ryoku-pkg-add ryoku-pkg-aur-add ryoku-pkg-remove ryoku-pkg-multilib ryoku-pkg-cachyos ryoku-gpu-lib32; do
     install -m 755 "$work/upstream/usr/bin/$helper" "$payload/usr/bin/"
 done
 install -Dm644 "$work/upstream/usr/lib/udev/rules.d/90-ryoku-gpu.rules" \
@@ -95,7 +97,6 @@ find "$payload/usr/lib/tsukuyomi" "$payload/usr/bin" -maxdepth 1 -type f -exec c
 install -Dm644 "$shell_src/ryoku/upstream/LICENSE" "$payload/usr/share/licenses/tsukuyomi-ryoku-desktop/LICENSE"
 install -Dm644 "$shell_src/ryoku/upstream/NOTICE" "$payload/usr/share/licenses/tsukuyomi-ryoku-desktop/NOTICE"
 install -m 644 "$root/system/desktop/autostart.lua" "$data/config/hypr/modules/autostart.lua"
-install -m 644 "$root/system/desktop/autostart.lua" "$skel/.config/hypr/modules/autostart.lua"
 install -m 644 "$root/system/desktop/hypridle.conf" "$skel/.config/hypr/"
 
 wallpapers="$work/wallpapers"
@@ -110,6 +111,16 @@ mkdir -p "$source_cache"
 source_cache=$(realpath -- "$source_cache")
 ipc="$work/ipc"
 "$shell_src/ryoku/build-shell.sh" "$ipc/payload/usr/bin/ryoku-shell" "$source_cache"
+# Rebrand user-visible folder icon theme name & desktop notification app labels.
+if [[ -f "$ipc/payload/usr/bin/ryoku-cmd-folders" ]]; then
+    sed -i 's/^Name=Ryoku Folders$/Name=Tsukuyomi Folders/' "$ipc/payload/usr/bin/ryoku-cmd-folders"
+fi
+for cmd_bin in ryoku-app ryoku-cmd-game-mode ryoku-cmd-record ryoku-cmd-recording-saved; do
+    if [[ -f "$ipc/payload/usr/bin/$cmd_bin" ]]; then
+        sed -i 's/notify-send -a Ryoku\b/notify-send -a Tsukuyomi/g; s/notify-send -a "Ryoku"/notify-send -a "Tsukuyomi"/g' \
+            "$ipc/payload/usr/bin/$cmd_bin"
+    fi
+done
 cp "$root/packages/pkgbuilds/ryoku-shell/PKGBUILD" "$ipc/"
 (cd "$ipc" && PKGDEST="$work/repo" makepkg --nodeps --noconfirm)
 

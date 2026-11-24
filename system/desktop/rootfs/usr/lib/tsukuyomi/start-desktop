@@ -14,13 +14,17 @@ if [[ ! -e $qt_palette && -r $qt_config ]] &&
     fi
 fi
 
-export TSUKUYOMI_SOFTWARE_RENDERER=0
+if [[ ${TSUKUYOMI_SOFTWARE_RENDERER:-0} == 1 || ${LIBGL_ALWAYS_SOFTWARE:-0} == 1 ]]; then
+    export TSUKUYOMI_SOFTWARE_RENDERER=1
+else
+    export TSUKUYOMI_SOFTWARE_RENDERER=0
+fi
 if [[ -n ${XDG_RUNTIME_DIR:-} && -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
     compositor_runtime="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE"
     renderer_log="$compositor_runtime/hyprland.log"
-    # Aquamarine colours each Renderer token and also logs CDRMRenderer diagnostics.
-    # Match only its actual device names after stripping ANSI colour escapes.
-    if [[ -r $renderer_log ]] && awk '
+    if [[ $TSUKUYOMI_SOFTWARE_RENDERER == 1 ]]; then
+        printf '1\n' > "$compositor_runtime/tsukuyomi-software-renderer" 2>/dev/null || true
+    elif [[ -r $renderer_log ]] && awk '
         {
             gsub(/\033\[[0-9;]*m/, "")
             if (match($0, /(^|[[:space:]])Renderer: /)) {
@@ -43,7 +47,30 @@ dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY \
     HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_SESSION_ID \
     QT_QPA_PLATFORMTHEME RYOKU_WM TSUKUYOMI_SOFTWARE_RENDERER XDG_DATA_DIRS
 systemctl --user start ryoku-session.target
-systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal-gtk.service
+systemctl --user restart xdg-desktop-portal-hyprland.service xdg-desktop-portal-gtk.service xdg-desktop-portal.service || true
+
+# Restore essential session login hooks (HiDPI autoscale, multi-GPU persist,
+# GTK dark default, tinted folder icons, Bluetooth A2DP, nightlight, snapshot notify).
+(
+    command -v ryoku-monitor >/dev/null 2>&1 && ryoku-monitor autoscale || true
+    command -v ryoku-gpu >/dev/null 2>&1 && ryoku-gpu persist || true
+    if command -v gsettings >/dev/null 2>&1; then
+        cur_scheme=$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || true)
+        if [[ $cur_scheme == "'default'" || -z $cur_scheme ]]; then
+            gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' || true
+        fi
+        cur_theme=$(gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null || true)
+        if [[ $cur_theme == "'Adwaita'" || -z $cur_theme ]]; then
+            gsettings set org.gnome.desktop.interface gtk-theme 'adw-gtk3-dark' || true
+        fi
+    fi
+    command -v ryoku-cmd-folders >/dev/null 2>&1 && ryoku-cmd-folders || true
+    command -v ryoku-cmd-nightlight >/dev/null 2>&1 && ryoku-cmd-nightlight restore || true
+    command -v limine-snapper-restore >/dev/null 2>&1 && limine-snapper-restore --notify || true
+) >/dev/null 2>&1 &
+if command -v ryoku-bt-audio >/dev/null 2>&1; then
+    ryoku-bt-audio watch >/dev/null 2>&1 &
+fi
 
 if command -v ryoku-session-intro >/dev/null 2>&1; then
     (
