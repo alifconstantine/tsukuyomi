@@ -1,6 +1,6 @@
 pkgname=ryogami
 pkgver=1.0.9.r6109.g08ff328
-pkgrel=3
+pkgrel=4
 epoch=1
 pkgdesc='Tsukuyomi Wallpapers, based on the Ryogami wallpaper engine'
 arch=('x86_64')
