@@ -1,0 +1,13 @@
+#!/usr/bin/bash
+
+# Hyprland can read a managed Lua module while pacman is replacing it.
+# Reload through the active user's manager once all package files are in place.
+while read -r uid account _; do
+    [[ $uid =~ ^[0-9]+$ && $uid != 0 ]] || continue
+    manager="$account@.host"
+    /usr/bin/timeout 5s /usr/bin/systemctl --user --machine="$manager" --quiet \
+        is-active ryoku-session.target || continue
+    /usr/bin/timeout 6s /usr/bin/systemd-run --user --machine="$manager" --quiet --wait --collect \
+        --property=RuntimeMaxSec=5s /usr/bin/hyprctl reload config-only ||
+        printf 'Could not reload Hyprland for %s.\n' "$account" >&2
+done < <(/usr/bin/loginctl list-users --no-legend --no-pager)

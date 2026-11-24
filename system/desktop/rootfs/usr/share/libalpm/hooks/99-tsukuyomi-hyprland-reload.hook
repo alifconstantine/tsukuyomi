@@ -1,0 +1,9 @@
+[Trigger]
+Operation = Upgrade
+Type = Package
+Target = tsukuyomi-ryoku-desktop
+
+[Action]
+Description = Reloading the active Tsukuyomi Hyprland configuration...
+When = PostTransaction
+Exec = /usr/lib/tsukuyomi/reload-hyprland-after-upgrade
