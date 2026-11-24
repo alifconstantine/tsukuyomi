@@ -1214,7 +1214,7 @@ def _launch_registered_app(args: argparse.Namespace, rec: dict, prefix: Path, ex
     open_root = Path("/mnt/tsukuyomi-open")
     mapped_open = False
     for idx, raw in enumerate(args.extra_args):
-        decoded = _decode_uri_path(raw)
+        decoded = decode_file_uri(raw)
         p = Path(decoded)
         if p.exists() and sandbox:
             rp = p.resolve()

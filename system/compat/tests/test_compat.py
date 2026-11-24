@@ -480,6 +480,25 @@ class CompatTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             compat_common.decode_file_uri("file://another-computer/share/Setup.exe")
 
+    def test_windows_launcher_maps_file_uri_to_sandbox_drive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prefix = root / "app"
+            executable = prefix / "drive_c" / "App.exe"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            (prefix / "dosdevices").mkdir()
+            document = root / "My Document.txt"
+            document.touch()
+            args = mock.Mock(extra_args=[document.as_uri()])
+            with mock.patch.object(tsukuyomi_win, "_ensure_prefix"), \
+                 mock.patch.object(tsukuyomi_win, "_build_bwrap_argv", return_value=["bwrap"]) as build, \
+                 mock.patch.object(tsukuyomi_win.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                self.assertEqual(tsukuyomi_win._launch_registered_app(args, {"sandbox": True}, prefix, executable), 0)
+            self.assertEqual(build.call_args.args[0][-1], "E:\\f0\\My Document.txt")
+            self.assertEqual(build.call_args.kwargs["ro_binds"], [(document, Path("/mnt/tsukuyomi-open/f0/My Document.txt"))])
+            self.assertFalse((prefix / "dosdevices" / "e:").is_symlink())
+
     def test_windows_cancel_cleans_only_the_new_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(os.environ, {"XDG_DATA_HOME": tmp, "XDG_RUNTIME_DIR": tmp}):
