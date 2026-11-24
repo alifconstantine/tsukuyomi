@@ -497,6 +497,54 @@ class CompatTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         run.assert_not_called()
 
+    def test_android_defaults_to_standard_phone_size_and_respects_reserved_insets(self) -> None:
+        self.assertEqual(tsukuyomi_droid.default_config()["phoneSize"], "standard")
+        with mock.patch.object(
+            tsukuyomi_droid, "detect_hypr_monitor",
+            return_value={"width": 1366, "height": 768, "scale": 1.0, "reservedX": 0, "reservedY": 100},
+        ):
+            w, h = tsukuyomi_droid._phone_viewport("standard")
+            self.assertLessEqual(h, 668)
+            self.assertLessEqual(w, 480)
+
+    def test_bwrap_hardening_caps_and_cursor_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prefix = root / "pfx"
+            prefix.mkdir()
+            (root / "pipewire-0").touch()
+            env = {
+                "USER": "tester",
+                "HOME": str(root),
+                "WINEPREFIX": str(prefix),
+                "XCURSOR_THEME": "Bibata-Modern-Classic",
+                "XCURSOR_SIZE": "24",
+                "WAYLAND_DISPLAY": "wayland-1",
+            }
+            with mock.patch.object(tsukuyomi_win.shutil, "which", return_value="/usr/bin/bwrap"), \
+                 mock.patch.object(tsukuyomi_win, "xdg_runtime_dir", return_value=root), \
+                 mock.patch.object(tsukuyomi_win, "shared_dir", return_value=root / "shared"):
+                argv = tsukuyomi_win._build_bwrap_argv(["wine", "app.exe"], env=env, prefix=prefix, ro_binds=[], cwd=prefix)
+            self.assertIn("--cap-drop", argv)
+            self.assertIn("ALL", argv)
+            self.assertIn("--unshare-uts", argv)
+            self.assertIn("XCURSOR_THEME", argv)
+            self.assertNotIn("/dev/snd", argv)
+
+    def test_win_wayland_skips_logpixels_double_scaling(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = Path(tmp) / "pfx"
+            (prefix / "drive_c").mkdir(parents=True)
+            with mock.patch.object(tsukuyomi_win, "detect_hypr_monitor", return_value={"width": 3840, "height": 2160, "scale": 2.0}), \
+                 mock.patch.object(tsukuyomi_win, "detect_theme_dark", return_value=True), \
+                 mock.patch.object(tsukuyomi_win, "_run_prefix_setup"):
+                tsukuyomi_win._apply_prefix_hardening_and_theme(prefix, sandbox=True, wayland=True, dxvk=True)
+                meta_wl = tsukuyomi_win.read_json(prefix / ".tsukuyomi-prefix.json", {})
+                self.assertEqual(meta_wl["appliedState"]["dpi"], 96)
+                tsukuyomi_win._apply_prefix_hardening_and_theme(prefix, sandbox=True, wayland=False, dxvk=True)
+                meta_xw = tsukuyomi_win.read_json(prefix / ".tsukuyomi-prefix.json", {})
+                self.assertEqual(meta_xw["appliedState"]["dpi"], 192)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -195,10 +195,27 @@ def detect_hypr_monitor() -> dict[str, object]:
         if not isinstance(monitors, list) or not monitors:
             return fallback
         focused = next((m for m in monitors if m.get("focused")), monitors[0])
+        width = int(focused.get("width") or 1920)
+        height = int(focused.get("height") or 1080)
+        scale = float(focused.get("scale") or 1.0)
+        transform = int(focused.get("transform") or 0)
+        if transform % 2 == 1:
+            width, height = height, width
+        reserved = focused.get("reserved")
+        res_x = 0
+        res_y = 0
+        if isinstance(reserved, list) and len(reserved) == 4:
+            try:
+                res_x = max(0, int(reserved[0])) + max(0, int(reserved[2]))
+                res_y = max(0, int(reserved[1])) + max(0, int(reserved[3]))
+            except (ValueError, TypeError):
+                res_x, res_y = 0, 0
         return {
-            "width": int(focused.get("width") or 1920),
-            "height": int(focused.get("height") or 1080),
-            "scale": float(focused.get("scale") or 1.0),
+            "width": width,
+            "height": height,
+            "scale": scale,
+            "reservedX": res_x,
+            "reservedY": res_y,
         }
     except (ValueError, TypeError, json.JSONDecodeError):
         return fallback

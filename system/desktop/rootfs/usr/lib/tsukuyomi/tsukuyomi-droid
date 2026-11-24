@@ -102,7 +102,7 @@ def default_config() -> dict[str, object]:
     return {
         "showSystemApps": False,
         "defaultMode": "phone",
-        "phoneSize": "auto",
+        "phoneSize": "standard",
         "gameResolution": "1280x720",
         "sharedDownloads": False,
         "autoSeedStores": True,
@@ -280,8 +280,9 @@ def _adb_waydroid(*adb_args: str, timeout: int = 15, connect: bool = True) -> su
 
 def _droid_error(result: subprocess.CompletedProcess[str], fallback: str) -> str:
     detail = result.stderr.strip() or result.stdout.strip()
-    if "device unauthorized" in detail:
-        return "Open Android from Tsukuyomi Hub → Compatibility, allow USB debugging for this computer in Android, then try again."
+    low = detail.lower()
+    if "device unauthorized" in low or "connection refused" in low or "unable to connect" in low:
+        return "Open Android from Tsukuyomi Hub → Compatibility, enable Developer Options → USB debugging and authorize this computer, then try again."
     return detail or fallback
 
 
@@ -302,10 +303,16 @@ def _phone_viewport(size: str) -> tuple[int, int]:
     width, height = PHONE_VIEWPORTS.get(size, PHONE_VIEWPORTS["standard"])
     monitor = detect_hypr_monitor()
     scale = max(1.0, float(monitor["scale"]))
+    res_x = max(0, int(monitor.get("reservedX") or 0))
+    res_y = max(0, int(monitor.get("reservedY") or 0))
+    avail_w = max(320.0, int(monitor["width"]) / scale - res_x)
+    avail_h = max(480.0, int(monitor["height"]) / scale - res_y)
     # Android lays out to the real viewport. Preserve usable text width on short
     # monitors by trimming the viewport height instead of shrinking both axes.
-    height = min(height, round(int(monitor["height"]) * 0.86 / scale))
-    width = min(width, round(int(monitor["width"]) * 0.90 / scale), round(height * 0.80))
+    max_h = round(avail_h * (0.94 if res_y > 0 else 0.86))
+    max_w = round(avail_w * 0.90)
+    height = min(height, max_h)
+    width = min(width, max_w, round(height * 0.80))
     return max(1, width), max(1, height)
 
 
@@ -356,13 +363,25 @@ def _ensure_container_and_session(*, multi_windows: bool | None = None, width: i
     _ensure_container_ready()
 
     # Waydroid prop get/set requires an active session; start session first if stopped.
-    if not _session_running():
+    was_running = _session_running()
+    if not was_running:
         subprocess.Popen(
             ["waydroid", "session", "start"], stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
         )
-    if not _wait_for_session_boot():
-        return False
+    if not _wait_for_session_boot(timeout_sec=15.0 if was_running else 60.0):
+        # Recover automatically from a wedged session whose container died/restarted.
+        if was_running:
+            run_cmd(["waydroid", "session", "stop"], timeout=15)
+            run_cmd(["systemctl", "restart", "waydroid-container.service"], timeout=15)
+            subprocess.Popen(
+                ["waydroid", "session", "start"], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+            if not _wait_for_session_boot():
+                return False
+        else:
+            return False
     if multi_windows is None:
         return True
 
@@ -371,7 +390,8 @@ def _ensure_container_and_session(*, multi_windows: bool | None = None, width: i
     desired_h = str(height) if height > 0 else ""
 
     cur_mw_res = run_cmd(["waydroid", "prop", "get", "persist.waydroid.multi_windows"], timeout=4)
-    cur_mw = "false" if (cur_mw_res.returncode == 0 and "false" in cur_mw_res.stdout.lower()) else "true"
+    # Waydroid 1.6.3 defaults unset persist.waydroid.multi_windows to false.
+    cur_mw = "true" if (cur_mw_res.returncode == 0 and cur_mw_res.stdout.strip().lower() == "true") else "false"
     cur_w_res = run_cmd(["waydroid", "prop", "get", "persist.waydroid.width"], timeout=4)
     cur_h_res = run_cmd(["waydroid", "prop", "get", "persist.waydroid.height"], timeout=4)
     cur_w = "" if "not set" in cur_w_res.stdout.lower() else cur_w_res.stdout.strip()
@@ -725,9 +745,10 @@ def cmd_gamescope_session(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     try:
+        gw, gh = _fit_viewport(args.width, args.height)
         with droid_lock():
             if not _ensure_container_and_session(
-                multi_windows=False, width=args.width, height=args.height, fake_touch_pkg=pkg,
+                multi_windows=False, width=gw, height=gh, fake_touch_pkg=pkg,
             ) or not owns_session():
                 return 1
             _adb_waydroid("shell", "wm", "user-rotation", "lock", "1", timeout=5, connect=False)
@@ -736,7 +757,7 @@ def cmd_gamescope_session(args: argparse.Namespace) -> int:
                 return launched.returncode
         # Gamescope stays up for the lifetime of its child command.
         while owns_session():
-            time.sleep(1)
+            time.sleep(2.5)
         return 0
     finally:
         if owns_session():
@@ -763,9 +784,11 @@ def cmd_resize(args: argparse.Namespace) -> int:
             try:
                 cls = str(json.loads(window.stdout).get("class") or "").lower()
                 if cls.startswith("waydroid.") or cls == "waydroid":
-                    geometry = f"hl.dsp.window.resize({{x = {win_w}, y = {win_h}, exact = true}})"
+                    geometry = f"hl.dsp.window.resize({{x = {win_w}, y = {win_h}}})"
                     result = run_cmd(["hyprctl", "dispatch", geometry], timeout=3)
                     resized = result.returncode == 0 and result.stdout.strip() == "ok"
+                    if resized:
+                        run_cmd(["hyprctl", "dispatch", "hl.dsp.window.center()"], timeout=3)
             except (ValueError, AttributeError):
                 pass
     if not resized:
@@ -835,7 +858,7 @@ def main(argv: list[str]) -> int:
     p_game.add_argument("height", type=int)
 
     p_res = sub.add_parser("resize")
-    p_res.add_argument("preset", choices=("compact", "phone", "tablet", "landscape", "reset"))
+    p_res.add_argument("preset", choices=("compact", "phone", "tablet", "landscape", "fullhd", "reset"))
 
     p_prof = sub.add_parser("set-profile")
     p_prof.add_argument("package")
@@ -862,7 +885,7 @@ def main(argv: list[str]) -> int:
         return 0
     if args.cmd == "inspect":
         src = Path(args.file).expanduser().resolve()
-        icon_tmp = xdg_runtime_dir() / "tsukuyomi-droid-preview.png"
+        icon_tmp = xdg_runtime_dir() / f"tsukuyomi-droid-preview-{os.getpid()}.png"
         icon_tmp.unlink(missing_ok=True)
         info = inspect_android_package(src, icon_tmp)
         if not info.get("icon_extracted"):
@@ -887,7 +910,11 @@ def main(argv: list[str]) -> int:
         return cmd_sleep(args)
     if args.cmd == "open-ui":
         with droid_lock():
-            if _ensure_container_and_session(multi_windows=False):
+            cfg = load_config()
+            phone_size = str(cfg["phoneSize"])
+            w, h = _phone_viewport(phone_size) if phone_size in PHONE_VIEWPORTS else (0, 0)
+            if _ensure_container_and_session(multi_windows=False, width=w, height=h):
+                _seed_default_stores_if_needed()
                 subprocess.Popen(["waydroid", "show-full-ui"], shell=False)
                 return 0
             return 1

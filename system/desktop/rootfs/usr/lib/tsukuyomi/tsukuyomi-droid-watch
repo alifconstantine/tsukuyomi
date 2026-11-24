@@ -3,18 +3,52 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 import signal
 import subprocess
 import time
+from pathlib import Path
 
 from compat_common import xdg_data_home
 
 RUNNING = True
+WAYDROID_CFG = Path("/var/lib/waydroid/waydroid.cfg")
+IDLE_SLEEP_SEC = 600.0  # Auto-sleep Android container after 10 minutes with zero open Waydroid windows
 
 
 def _stop(_sig: int, _frame: object) -> None:
     global RUNNING
     RUNNING = False
+
+
+def _has_open_waydroid_window() -> bool:
+    if not shutil.which("hyprctl"):
+        return True
+    try:
+        res = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=3)
+        if res.returncode != 0:
+            return True
+        clients = json.loads(res.stdout)
+        if not isinstance(clients, list):
+            return True
+        for c in clients:
+            cls = str(c.get("class") or "").lower()
+            if cls == "waydroid" or cls.startswith("waydroid.") or cls == "gamescope":
+                return True
+        return False
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return True
+
+
+def _waydroid_session_active() -> bool:
+    if not shutil.which("waydroid"):
+        return False
+    try:
+        res = subprocess.run(["waydroid", "status"], capture_output=True, text=True, timeout=3)
+        return "Session:\tRUNNING" in res.stdout or "Session: RUNNING" in res.stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _needs_sync() -> dict[str, int]:
@@ -53,7 +87,14 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop)
 
     last_pending: dict[str, int] = {}
+    idle_since: float | None = None
+    last_idle_check = 0.0
     while RUNNING:
+        # Sleep gently with zero disk scanning when Waydroid has never been initialized.
+        if not WAYDROID_CFG.is_file():
+            time.sleep(15.0)
+            continue
+
         pending = _needs_sync()
         if pending and pending != last_pending:
             time.sleep(0.8)
@@ -62,7 +103,21 @@ def main() -> int:
         elif not pending:
             last_pending = {}
 
-        time.sleep(2.0)
+        now = time.monotonic()
+        if now - last_idle_check >= 30.0:
+            last_idle_check = now
+            if _waydroid_session_active():
+                if _has_open_waydroid_window():
+                    idle_since = None
+                elif idle_since is None:
+                    idle_since = now
+                elif now - idle_since >= IDLE_SLEEP_SEC:
+                    subprocess.run(["/usr/lib/tsukuyomi/tsukuyomi-droid", "sleep"], shell=False, capture_output=True)
+                    idle_since = None
+            else:
+                idle_since = None
+
+        time.sleep(3.0)
     return 0
 
 

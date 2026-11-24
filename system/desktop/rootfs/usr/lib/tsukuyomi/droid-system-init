@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -109,21 +110,38 @@ def cmd_init(args: argparse.Namespace) -> int:
         props["persist.waydroid.multi_windows"] = "false"
         props["persist.waydroid.width"] = str(width)
         props["persist.waydroid.height"] = str(height)
+        props["ro.sf.lcd_density"] = "240" if width <= 560 else "220"
 
     _update_cfg_section("properties", props)
     if args.drm_node and DRM_NODE_RE.match(args.drm_node) and Path(args.drm_node).exists():
         _update_cfg_section("waydroid", {"drm_device": args.drm_node})
 
+    # Keep waydroid-container.service on-demand (not auto-started on boot) to avoid
+    # reserving 1-2.5 GB RAM when Android apps are not in use.
     for command in (
         ["waydroid", "upgrade", "--offline"],
-        ["systemctl", "enable", "waydroid-container.service"],
+        ["systemctl", "disable", "waydroid-container.service"],
         ["systemctl", "restart", "waydroid-container.service"],
     ):
         result = run_cmd(command)
-        if result.returncode != 0:
+        if result.returncode != 0 and command[1] != "disable":
             sys.stderr.write(result.stderr or result.stdout or "Android setup could not finish.\n")
             return result.returncode
     return 0
+
+
+def _detect_default_gpu() -> str:
+    dri = Path("/dev/dri")
+    if dri.is_dir():
+        for node in sorted(dri.glob("renderD*")):
+            sys_vendor = Path(f"/sys/class/drm/{node.name}/device/vendor")
+            try:
+                vendor = sys_vendor.read_text(encoding="utf-8").strip().lower()
+            except OSError:
+                continue
+            if vendor in ("0x1002", "0x8086", "0x1af4"):
+                return "mesa"
+    return "swiftshader"
 
 
 def cmd_addon(args: argparse.Namespace) -> int:
@@ -133,7 +151,14 @@ def cmd_addon(args: argparse.Namespace) -> int:
 
     if not WAYDROID_CFG.is_file():
         print("Initializing Waydroid offline first...", flush=True)
-        init_ns = argparse.Namespace(gpu="mesa", offline=True, gapps=False, force=False, drm_node="")
+        init_ns = argparse.Namespace(
+            gpu=_detect_default_gpu(),
+            offline=True,
+            gapps=False,
+            force=False,
+            drm_node="",
+            viewport=(480, 960),
+        )
         if cmd_init(init_ns) != 0:
             return 1
 
@@ -166,7 +191,7 @@ def cmd_addon(args: argparse.Namespace) -> int:
         run_cmd(["systemctl", "start", "waydroid-container.service"])
 
 
-def _update_fstab_bind(user: str, host_dl: Path, droid_dl: Path, enable: bool) -> None:
+def _update_fstab_bind(user: str, home: Path, host_dl: Path, droid_dl: Path, enable: bool) -> None:
     if not FSTAB_PATH.is_file():
         return
     tag = f"# tsukuyomi-droid-shared-{user}"
@@ -175,10 +200,24 @@ def _update_fstab_bind(user: str, host_dl: Path, droid_dl: Path, enable: bool) -
     if enable:
         entry = (
             f"{host_dl} {droid_dl} none "
-            f"bind,nofail,x-systemd.requires-mounts-for=/home/{user} 0 0 {tag}"
+            f"bind,nofail,x-systemd.requires-mounts-for={home} 0 0 {tag}"
         )
         filtered.append(entry)
-    FSTAB_PATH.write_text("\n".join(filtered) + "\n", encoding="utf-8")
+    payload = "\n".join(filtered) + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=".fstab.tsukuyomi.", dir=str(FSTAB_PATH.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, FSTAB_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def cmd_bind_shared(args: argparse.Namespace) -> int:
@@ -186,19 +225,36 @@ def cmd_bind_shared(args: argparse.Namespace) -> int:
     if not USER_RE.match(user) or user == "root":
         print(f"Invalid user: {user!r}", file=sys.stderr)
         return 1
-    home = Path(f"/home/{user}")
+    try:
+        pw = pwd.getpwnam(user)
+    except KeyError:
+        print(f"Unknown user: {user!r}", file=sys.stderr)
+        return 1
+    home = Path(pw.pw_dir)
     host_dl = home / "Downloads"
     if not host_dl.is_dir():
         return 1
     droid_dl = home / ".local" / "share" / "waydroid" / "data" / "media" / "0" / "Download"
-    droid_dl.mkdir(parents=True, exist_ok=True)
-    # Grant tight POSIX ACL to Android media_rw (UID 1023) + host user UID so both can read/write cleanly.
-    if shutil.which("setfacl"):
-        acl_spec = f"u:1023:rwx,u:{args.uid}:rwx"
-        run_cmd(["setfacl", "-R", "-m", acl_spec, str(host_dl)])
-        run_cmd(["setfacl", "-R", "-d", "-m", acl_spec, str(host_dl)])
     enable = args.enable == "true"
     if enable:
+        droid_dl.mkdir(parents=True, exist_ok=True)
+        for parent in (
+            home / ".local" / "share" / "waydroid",
+            home / ".local" / "share" / "waydroid" / "data",
+            home / ".local" / "share" / "waydroid" / "data" / "media",
+            home / ".local" / "share" / "waydroid" / "data" / "media" / "0",
+            droid_dl,
+        ):
+            try:
+                if parent.exists() and parent.stat().st_uid == 0:
+                    os.chown(parent, pw.pw_uid, pw.pw_gid)
+            except OSError:
+                pass
+        # Grant tight POSIX ACL to Android media_rw (UID 1023) + host user UID.
+        if shutil.which("setfacl"):
+            acl_spec = f"u:1023:rwx,u:{pw.pw_uid}:rwx"
+            run_cmd(["setfacl", "-R", "-m", acl_spec, str(host_dl)])
+            run_cmd(["setfacl", "-R", "-d", "-m", acl_spec, str(host_dl)])
         mounted = run_cmd(["mountpoint", "-q", str(droid_dl)]).returncode == 0
         if not mounted:
             res = run_cmd(["mount", "--bind", str(host_dl), str(droid_dl)])
@@ -206,9 +262,12 @@ def cmd_bind_shared(args: argparse.Namespace) -> int:
                 sys.stderr.write(res.stderr)
                 return res.returncode
     else:
-        if run_cmd(["mountpoint", "-q", str(droid_dl)]).returncode == 0:
+        if droid_dl.exists() and run_cmd(["mountpoint", "-q", str(droid_dl)]).returncode == 0:
             run_cmd(["umount", str(droid_dl)])
-    _update_fstab_bind(user, host_dl, droid_dl, enable)
+        if shutil.which("setfacl"):
+            run_cmd(["setfacl", "-R", "-x", "u:1023", str(host_dl)])
+            run_cmd(["setfacl", "-R", "-d", "-x", "u:1023", str(host_dl)])
+    _update_fstab_bind(user, home, host_dl, droid_dl, enable)
     return 0
 
 
