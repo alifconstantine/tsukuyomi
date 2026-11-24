@@ -41,6 +41,21 @@ def xdg_runtime_dir() -> Path:
     return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 
 
+def has_open_android_window() -> bool:
+    try:
+        result = run_cmd(["hyprctl", "clients", "-j"], timeout=3)
+        clients = json.loads(result.stdout) if result.returncode == 0 else None
+        if not isinstance(clients, list):
+            return True
+        for client in clients:
+            app_class = str(client.get("class") or "").casefold()
+            if app_class in ("waydroid", "gamescope") or app_class.startswith("waydroid."):
+                return True
+        return False
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+        return True
+
+
 def slugify(raw: str, fallback: str = "app") -> str:
     cleaned = re.sub(r"[^a-z0-9]+", "-", (raw or "").lower()).strip("-")
     cleaned = cleaned[:64].strip("-")

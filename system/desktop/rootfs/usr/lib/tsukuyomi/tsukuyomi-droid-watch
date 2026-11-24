@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import signal
 import subprocess
 import time
 from pathlib import Path
 
-from compat_common import xdg_data_home
+from compat_common import has_open_android_window, xdg_data_home
 
 RUNNING = True
 WAYDROID_CFG = Path("/var/lib/waydroid/waydroid.cfg")
@@ -20,25 +19,6 @@ IDLE_SLEEP_SEC = 600.0  # Auto-sleep Android container after 10 minutes with zer
 def _stop(_sig: int, _frame: object) -> None:
     global RUNNING
     RUNNING = False
-
-
-def _has_open_waydroid_window() -> bool:
-    if not shutil.which("hyprctl"):
-        return True
-    try:
-        res = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=3)
-        if res.returncode != 0:
-            return True
-        clients = json.loads(res.stdout)
-        if not isinstance(clients, list):
-            return True
-        for c in clients:
-            cls = str(c.get("class") or "").lower()
-            if cls == "waydroid" or cls.startswith("waydroid.") or cls == "gamescope":
-                return True
-        return False
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return True
 
 
 def _waydroid_session_active() -> bool:
@@ -107,12 +87,12 @@ def main() -> int:
         if now - last_idle_check >= 30.0:
             last_idle_check = now
             if _waydroid_session_active():
-                if _has_open_waydroid_window():
+                if has_open_android_window():
                     idle_since = None
                 elif idle_since is None:
                     idle_since = now
                 elif now - idle_since >= IDLE_SLEEP_SEC:
-                    subprocess.run(["/usr/lib/tsukuyomi/tsukuyomi-droid", "sleep"], shell=False, capture_output=True)
+                    subprocess.run(["/usr/lib/tsukuyomi/tsukuyomi-droid", "sleep", "--idle"], shell=False, capture_output=True)
                     idle_since = None
             else:
                 idle_since = None

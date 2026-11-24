@@ -523,6 +523,44 @@ class CompatTests(unittest.TestCase):
             self.assertEqual(result, 1)
             self.assertFalse(json.loads(out.getvalue())["ok"])
 
+    def test_android_install_accepts_file_uri_and_reports_backend_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            apk = Path(tmp) / "Sample App.apk"
+            with zipfile.ZipFile(apk, "w") as zf:
+                zf.writestr("AndroidManifest.xml", _build_synthetic_axml("org.tsukuyomi.demo", "1", "Demo"))
+            desktop = Path(tmp) / "applications" / "waydroid.org.tsukuyomi.demo.desktop"
+            desktop.parent.mkdir()
+            desktop.write_text("[Desktop Entry]\nName=Demo\n")
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": tmp, "XDG_RUNTIME_DIR": tmp}), \
+                 mock.patch.object(tsukuyomi_droid, "_ensure_container_ready"), \
+                 mock.patch.object(tsukuyomi_droid, "_session_running", return_value=True), \
+                 mock.patch.object(tsukuyomi_droid, "_wait_for_session_boot", return_value=True) as wait, \
+                 mock.patch.object(tsukuyomi_droid, "_seed_default_stores_if_needed"), \
+                 mock.patch.object(tsukuyomi_droid, "sync_desktop", return_value={"synced": ["org.tsukuyomi.demo"]}), \
+                 mock.patch.object(tsukuyomi_droid, "run_cmd", return_value=subprocess.CompletedProcess([], 0)) as run, \
+                 mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+                self.assertEqual(tsukuyomi_droid.main(["install", apk.as_uri(), "--progress"]), 0)
+            wait.assert_called_once_with()
+            run.assert_called_once_with([tsukuyomi_droid.PLATFORM, "install", str(apk)], timeout=180)
+            self.assertTrue(json.loads(out.getvalue())["launcherReady"])
+            self.assertEqual(
+                err.getvalue().splitlines(),
+                [f"TSUKUYOMI_PROGRESS {stage}" for stage in ("inspect", "runtime", "boot", "install", "stores", "launcher")],
+            )
+
+    def test_android_idle_sleep_skips_an_install_or_an_open_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmp}), \
+             mock.patch.object(tsukuyomi_droid, "has_open_android_window", return_value=True) as visible, \
+             mock.patch.object(tsukuyomi_droid, "run_cmd") as run:
+            with tsukuyomi_droid.droid_lock():
+                self.assertEqual(tsukuyomi_droid.main(["sleep", "--idle"]), 0)
+            visible.assert_not_called()
+            self.assertEqual(tsukuyomi_droid.main(["sleep", "--idle"]), 0)
+            visible.assert_called_once_with()
+            run.assert_not_called()
+
     def test_android_adb_does_not_guess_a_container_address(self) -> None:
         with mock.patch.object(tsukuyomi_droid.shutil, "which", return_value="/usr/bin/adb"), \
              mock.patch.object(tsukuyomi_droid, "_waydroid_ip", return_value=None), \
