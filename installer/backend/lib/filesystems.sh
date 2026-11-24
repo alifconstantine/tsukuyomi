@@ -20,12 +20,10 @@ tsukuyomi_filesystems() {
 
 tsukuyomi_mount() {
   local o=$TSUKUYOMI_BTRFS_OPTS
+  run mount -o "$o,subvol=@" "$ROOT_DEV" /mnt
   if [[ -z ${TSUKUYOMI_DRYRUN:-} ]]; then
-    mountpoint -q /mnt || mount --bind /mnt /mnt
     mount --make-private /mnt
   fi
-
-  run mount -o "$o,subvol=@" "$ROOT_DEV" /mnt
   run mkdir -p /mnt/home /mnt/var/log /mnt/var/cache/pacman/pkg /mnt/boot
   [[ ${TSUKUYOMI_SUBVOL_SNAPSHOTS:-1} == 1 ]] && run mkdir -p /mnt/.snapshots
 
@@ -33,7 +31,7 @@ tsukuyomi_mount() {
   run mount -o "$o,subvol=@log" "$ROOT_DEV" /mnt/var/log
   run mount -o "$o,subvol=@pkg" "$ROOT_DEV" /mnt/var/cache/pacman/pkg
   [[ ${TSUKUYOMI_SUBVOL_SNAPSHOTS:-1} == 1 ]] && run mount -o "$o,subvol=@snapshots" "$ROOT_DEV" /mnt/.snapshots
-  run mount "$ESP_DEV" /mnt/boot
+  run mount -o fmask=0077,dmask=0077 "$ESP_DEV" /mnt/boot
 
   if [[ -z ${TSUKUYOMI_DRYRUN:-} ]]; then
     local esp_avail_kib

@@ -44,8 +44,29 @@ if [[ -f "$boot_src/limine/limine.conf" && -f "$esp/limine.conf" ]]; then
   rm -f "$tmp" "$tmp.2"
 fi
 
-if command -v limine-mkinitcpio >/dev/null 2>&1; then
+if command -v limine-update >/dev/null 2>&1; then
+  limine-update
+elif command -v limine-mkinitcpio >/dev/null 2>&1; then
   limine-mkinitcpio
 elif command -v mkinitcpio >/dev/null 2>&1; then
   mkinitcpio -P
+fi
+
+if [[ -f "$esp/limine.conf" ]]; then
+  entry_path=$(awk '
+    { t = $0; sub(/^[[:space:]]+/, "", t) }
+    t ~ /^\/[^\/]/                 { dir = t; sub(/^\/\+?/, "", dir); next }
+    t ~ /^\/\/[^\/]/ && dir != "" {
+      k = t; sub(/^\/\//, "", k)
+      if (k == "Snapshots") next
+      print dir "/" k
+      exit
+    }
+  ' "$esp/limine.conf")
+  if [[ -n $entry_path ]]; then
+    tmp=$(mktemp)
+    awk -v p="$entry_path" '/^default_entry:/ { print "default_entry: " p; next } { print }' "$esp/limine.conf" >"$tmp"
+    cat "$tmp" >"$esp/limine.conf"
+    rm -f "$tmp"
+  fi
 fi

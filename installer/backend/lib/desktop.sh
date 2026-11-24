@@ -133,7 +133,11 @@ EOF
     bluetooth.service
     rtkit-daemon.service
     power-profiles-daemon.service
+    fstrim.timer
   )
+  if chroot_has qemu-ga; then
+    enable_services+=(qemu-guest-agent.service)
+  fi
   if [[ -f /mnt/etc/systemd/system/tsukuyomi-greeter-guard.service || ( -n ${TSUKUYOMI_DRYRUN:-} && -f "$TSUKUYOMI_SHARE/sddm/tsukuyomi-greeter-guard.service" ) ]]; then
     enable_services+=(tsukuyomi-greeter-guard.service)
   fi

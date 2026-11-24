@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Guided whole-disk GPT layout: 1 GiB EFI System Partition + Btrfs root/LUKS partition.
+# Guided whole-disk GPT layout: 2 GiB EFI System Partition + Btrfs root/LUKS partition.
 
 tsukuyomi_partition_whole() {
-  local esp_mib=$(( ${TSUKUYOMI_ESP_GIB:-1} * 1024 ))
+  local esp_mib=$(( ${TSUKUYOMI_ESP_GIB:-2} * 1024 ))
   local esp_end_mib=$(( 1 + esp_mib ))
 
   log "wiping & creating GPT table on %s (ESP=%s MiB)" "$TSUKUYOMI_DISK" "$esp_mib"
