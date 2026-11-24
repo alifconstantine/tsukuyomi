@@ -278,6 +278,34 @@ func listDisks(dryRun bool) []diskInfo {
 	return disks
 }
 
+func splitNmcliFields(line string) []string {
+	var fields []string
+	var cur strings.Builder
+	escaped := false
+	for _, r := range line {
+		if escaped {
+			cur.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		if r == ':' {
+			fields = append(fields, cur.String())
+			cur.Reset()
+			continue
+		}
+		cur.WriteRune(r)
+	}
+	if escaped {
+		cur.WriteRune('\\')
+	}
+	fields = append(fields, cur.String())
+	return fields
+}
+
 func scanWifi() ([]wifiNet, string) {
 	_ = exec.Command("nmcli", "device", "wifi", "rescan").Run()
 	out, err := exec.Command("nmcli", "-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "device", "wifi", "list").Output()
@@ -290,7 +318,7 @@ func scanWifi() ([]wifiNet, string) {
 		if line == "" {
 			continue
 		}
-		parts := strings.Split(line, ":")
+		parts := splitNmcliFields(line)
 		if len(parts) < 4 {
 			continue
 		}

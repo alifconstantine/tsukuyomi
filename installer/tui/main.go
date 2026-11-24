@@ -346,8 +346,7 @@ func (m model) keyLocale(k string) (tea.Model, tea.Cmd) {
 		case "esc", "enter":
 			m.locSearching = false
 		case "backspace":
-			if len(m.locSearch) > 0 {
-				m.locSearch = m.locSearch[:len(m.locSearch)-1]
+			if backspaceText(&m.locSearch) {
 				m.applyLocaleFilter()
 			}
 		default:
@@ -397,8 +396,7 @@ func (m model) keyTimezone(k string) (tea.Model, tea.Cmd) {
 		case "esc", "enter":
 			m.tzSearchOn = false
 		case "backspace":
-			if len(m.tzSearch) > 0 {
-				m.tzSearch = m.tzSearch[:len(m.tzSearch)-1]
+			if backspaceText(&m.tzSearch) {
 				m.applyTzFilter()
 			}
 		default:
@@ -443,9 +441,7 @@ func (m model) keyNetwork(k string) (tea.Model, tea.Cmd) {
 				m.sys = probeSystem()
 			}
 		case "backspace":
-			if len(m.wifiPass) > 0 {
-				m.wifiPass = m.wifiPass[:len(m.wifiPass)-1]
-			}
+			backspaceText(&m.wifiPass)
 		default:
 			editText(&m.wifiPass, k)
 		}
@@ -538,8 +534,8 @@ func (m model) keyDisk(k string) (tea.Model, tea.Cmd) {
 				m.diskCursor++
 			}
 		case "enter":
-			if len(m.disks) == 0 {
-				m.errMsg = "No writable target disk found"
+			if err := m.validateDisk(); err != nil {
+				m.errMsg = err.Error()
 			} else {
 				m.state = stepIdentity
 			}
@@ -551,25 +547,25 @@ func (m model) keyDisk(k string) (tea.Model, tea.Cmd) {
 	case 2:
 		if k == "enter" {
 			m.diskFocus = 3
-		} else if k == "backspace" && len(m.luksPass) > 0 {
-			m.luksPass = m.luksPass[:len(m.luksPass)-1]
+		} else if k == "backspace" {
+			backspaceText(&m.luksPass)
 		} else {
 			editText(&m.luksPass, k)
 		}
 	case 3:
 		if k == "enter" {
 			m.diskFocus = 4
-		} else if k == "backspace" && len(m.luksConf) > 0 {
-			m.luksConf = m.luksConf[:len(m.luksConf)-1]
+		} else if k == "backspace" {
+			backspaceText(&m.luksConf)
 		} else {
 			editText(&m.luksConf, k)
 		}
 	case 4:
-		if k == "space" || k == "enter" {
+		if k == "space" || k == " " {
 			m.snapshots = !m.snapshots
 		}
 	case 5:
-		if k == "space" || k == "right" || k == "l" || k == "enter" {
+		if k == "space" || k == " " || k == "right" || k == "l" {
 			m.swapIdx = (m.swapIdx + 1) % len(swapChoices)
 		} else if k == "left" || k == "h" {
 			m.swapIdx = (m.swapIdx - 1 + len(swapChoices)) % len(swapChoices)
@@ -618,25 +614,15 @@ func (m model) keyIdentity(k string) (tea.Model, tea.Cmd) {
 	case "backspace":
 		switch m.idFocus {
 		case 0:
-			if len(m.hostname) > 0 {
-				m.hostname = m.hostname[:len(m.hostname)-1]
-			}
+			backspaceText(&m.hostname)
 		case 1:
-			if len(m.username) > 0 {
-				m.username = m.username[:len(m.username)-1]
-			}
+			backspaceText(&m.username)
 		case 2:
-			if len(m.fullname) > 0 {
-				m.fullname = m.fullname[:len(m.fullname)-1]
-			}
+			backspaceText(&m.fullname)
 		case 3:
-			if len(m.password) > 0 {
-				m.password = m.password[:len(m.password)-1]
-			}
+			backspaceText(&m.password)
 		case 4:
-			if len(m.passConfirm) > 0 {
-				m.passConfirm = m.passConfirm[:len(m.passConfirm)-1]
-			}
+			backspaceText(&m.passConfirm)
 		}
 		return m, nil
 	default:
@@ -662,9 +648,7 @@ func (m model) keyReview(k string) (tea.Model, tea.Cmd) {
 		m.state = stepIdentity
 		return m, nil
 	case "backspace":
-		if len(m.confirmText) > 0 {
-			m.confirmText = m.confirmText[:len(m.confirmText)-1]
-		}
+		backspaceText(&m.confirmText)
 		return m, nil
 	case "enter":
 		if strings.ToUpper(strings.TrimSpace(m.confirmText)) != "INSTALL" {
@@ -720,6 +704,15 @@ func editText(dst *string, k string) bool {
 		return true
 	}
 	return false
+}
+
+func backspaceText(dst *string) bool {
+	r := []rune(*dst)
+	if len(r) == 0 {
+		return false
+	}
+	*dst = string(r[:len(r)-1])
+	return true
 }
 
 func (m *model) applyLocaleFilter() {
@@ -1053,8 +1046,15 @@ func (m model) viewWelcome() string {
 		fg(cMuted, "  • Desktop Shell  : Hyprland + Ryoku + Tsukuyomi lockscreen"),
 		fg(cMuted, "  • CLI Toolkit    : htop, btop, neovim, ripgrep, fd, bat, eza, fzf, zoxide"),
 		"",
-		boldFg(cText, "Press Enter to begin installation."),
 	}
+	if !m.sys.UEFI {
+		lines = append(lines,
+			boldFg(cErr, "! Legacy BIOS detected — Tsukuyomi OS requires UEFI firmware for Limine UKI."),
+			fg(cMuted, "  Reboot in UEFI mode before installing (or use --dry-run to preview)."),
+			"",
+		)
+	}
+	lines = append(lines, boldFg(cText, "Press Enter to begin installation."))
 	return strings.Join(lines, "\n")
 }
 

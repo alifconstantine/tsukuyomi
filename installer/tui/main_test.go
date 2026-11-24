@@ -176,3 +176,41 @@ func TestInstallLogKeepsLatestErrorVisible(t *testing.T) {
 		t.Fatalf("latest error missing from install log:\n%s", view)
 	}
 }
+
+func TestKeyDiskValidatesAndAvoidsDoubleToggle(t *testing.T) {
+	m := initialModel(true)
+	m.state = stepDisk
+	m.encrypt = true
+	m.luksPass = "abc"
+	m.luksConf = "abc"
+	m.diskFocus = 0
+
+	next, _ := m.onKey("enter")
+	nm := next.(model)
+	if nm.state != stepDisk || nm.errMsg == "" {
+		t.Fatalf("expected diskFocus=0 enter to enforce LUKS validation, got state=%s err=%q", nm.state, nm.errMsg)
+	}
+
+	m.encrypt = false
+	m.diskFocus = 4
+	origSnap := m.snapshots
+	next, _ = m.onKey("enter")
+	nm = next.(model)
+	if nm.state != stepIdentity || nm.snapshots != origSnap {
+		t.Fatalf("expected enter on snapshots to advance without flipping value, got state=%s snapshots=%v (want %v)", nm.state, nm.snapshots, origSnap)
+	}
+}
+
+func TestBackspaceTextUTF8(t *testing.T) {
+	s := "月読テスト"
+	if !backspaceText(&s) || s != "月読テス" {
+		t.Fatalf("UTF-8 backspace corrupted string: got %q", s)
+	}
+}
+
+func TestSplitNmcliFieldsEscapedColon(t *testing.T) {
+	parts := splitNmcliFields(`*:Home\:5G:85:WPA2`)
+	if len(parts) != 4 || parts[1] != "Home:5G" || parts[2] != "85" || parts[3] != "WPA2" {
+		t.Fatalf("unexpected nmcli split: %#v", parts)
+	}
+}
