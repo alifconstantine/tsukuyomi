@@ -29,7 +29,7 @@ import_session_environment() {
       XCURSOR_THEME|XCURSOR_SIZE|QML_IMPORT_PATH|QML2_IMPORT_PATH|PATH|\
       QT_QPA_PLATFORMTHEME|GDK_BACKEND|QT_QPA_PLATFORM|\
       QT_AUTO_SCREEN_SCALE_FACTOR|QT_WAYLAND_DISABLE_WINDOWDECORATION|\
-      ELECTRON_OZONE_PLATFORM_HINT|GSK_RENDERER|TSUKUYOMI_POLKIT_AGENT|\
+      ELECTRON_OZONE_PLATFORM_HINT|GSK_RENDERER|RYOKU_POLKIT_AGENT|\
       EDITOR|VISUAL)
         # systemctl emits shell-escaped assignments, including ANSI-C quoted
         # values for semicolons and wildcard characters.
@@ -65,7 +65,7 @@ session_is_foreground() {
 }
 
 apply_panel_gpu_environment() {
-  local nvidia="${TSUKUYOMI_NVIDIA_VERSION_PATH:-/proc/driver/nvidia/version}" vendor=""
+  local nvidia="${TSUKUYOMI_NVIDIA_PROC_VERSION_PATH:-/proc/driver/nvidia/version}" vendor=""
   [[ -r $nvidia ]] || return 0
   vendor=$(connected_panel_vendor 2>/dev/null || true)
   case "$vendor" in
@@ -98,7 +98,7 @@ needs_software_renderer() {
 }
 
 warn_nvidia_driver_mismatch() {
-  local version_path="${TSUKUYOMI_NVIDIA_VERSION_PATH:-/sys/module/nvidia/version}"
+  local version_path="${TSUKUYOMI_NVIDIA_MODULE_VERSION_PATH:-${TSUKUYOMI_NVIDIA_VERSION_PATH:-/sys/module/nvidia/version}}"
   local modinfo_command="${TSUKUYOMI_MODINFO_COMMAND:-modinfo}"
   local loaded installed
 
@@ -123,7 +123,7 @@ if needs_software_renderer; then
   export LIBGL_ALWAYS_SOFTWARE=1
   export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
   export GALLIUM_DRIVER=llvmpipe
-  export WLR_RENDERER_ALLOW_SOFTWARE=1
+  export TSUKUYOMI_SOFTWARE_RENDERER=1
 fi
 
 warn_nvidia_driver_mismatch

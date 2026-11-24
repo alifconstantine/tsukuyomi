@@ -25,6 +25,7 @@ fastfetch
 imagemagick
 networkmanager
 iwd
+iw
 wpa_supplicant
 wireless-regdb
 bluez

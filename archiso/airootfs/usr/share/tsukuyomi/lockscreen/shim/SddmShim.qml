@@ -103,13 +103,12 @@ Item {
             "v=$(loginctl show-session \"$XDG_SESSION_ID\" -p Active --value 2>/dev/null) || return 1; " +
             "case \"$v\" in yes|no) printf '%s\\n' \"$v\";; *) return 1;; esac; }; " +
             "probe() { emit_active || printf 'unknown\\n'; }; " +
-            "(dbus-monitor --system \"type='signal',sender='org.freedesktop.login1'," +
+            "probe; " +
+            "dbus-monitor --system \"type='signal',sender='org.freedesktop.login1'," +
             "path_namespace='/org/freedesktop/login1/session'," +
             "interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'," +
             "arg0='org.freedesktop.login1.Session'\" 2>/dev/null | " +
-            "while IFS= read -r line; do case \"$line\" in *PropertiesChanged*) probe;; esac; done) & " +
-            "monitor=$!; trap 'kill \"$monitor\" 2>/dev/null || true' EXIT; " +
-            "while kill -0 \"$monitor\" 2>/dev/null; do probe; sleep 0.5; done; wait \"$monitor\"; exit 1"
+            "while IFS= read -r line; do case \"$line\" in *PropertiesChanged*) probe;; esac; done; exit 1"
         ]
         stdout: SplitParser {
             onRead: (line) => shim.applySessionActivity(line)

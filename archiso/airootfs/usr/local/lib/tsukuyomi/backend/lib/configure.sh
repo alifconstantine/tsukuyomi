@@ -54,6 +54,25 @@ EOF
   if [[ -f "$TSUKUYOMI_SHARE/os/lsb-release" ]]; then
     run install -m 0644 "$TSUKUYOMI_SHARE/os/lsb-release" /mnt/etc/lsb-release
   fi
+  # Mask cachyos-hooks branding hooks and restore Tsukuyomi branding after filesystem/lsb-release upgrades
+  run mkdir -p /mnt/etc/pacman.d/hooks
+  local hook_name
+  for hook_name in cachyos-branding.hook os-release.hook lsb-release.hook; do
+    run ln -sfn /dev/null "/mnt/etc/pacman.d/hooks/$hook_name"
+  done
+  write_file /mnt/etc/pacman.d/hooks/zz-tsukuyomi-branding.hook <<'EOF'
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = filesystem
+Target = lsb-release
+
+[Action]
+Description = Preserving Tsukuyomi OS branding...
+When = PostTransaction
+Exec = /bin/sh -c 'test -f /usr/share/tsukuyomi/os/os-release && install -m 0644 /usr/share/tsukuyomi/os/os-release /etc/os-release; test -f /usr/share/tsukuyomi/os/lsb-release && install -m 0644 /usr/share/tsukuyomi/os/lsb-release /etc/lsb-release; true'
+EOF
   # Ensure i2c-dev loads for DDC/brightness integration
   run mkdir -p /mnt/etc/modules-load.d
   write_file /mnt/etc/modules-load.d/i2c-dev.conf <<'EOF'
@@ -98,7 +117,7 @@ tsukuyomi_cfg_initramfs() {
   if [[ -f $src ]]; then
     content=$(<"$src")
   else
-    content='HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont plymouth block encrypt resume filesystems fsck)'
+    content='HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont plymouth block encrypt filesystems btrfs-overlayfs fsck)'
   fi
   [[ ${TSUKUYOMI_ENCRYPT:-0} == 1 ]] || content=$(printf '%s\n' "$content" | sed -E '/^HOOKS=/ s/ encrypt\b//')
   run mkdir -p /mnt/etc/mkinitcpio.conf.d

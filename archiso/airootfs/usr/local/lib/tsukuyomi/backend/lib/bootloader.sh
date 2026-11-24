@@ -94,6 +94,10 @@ tsukuyomi_bootloader() {
     esp_disk=$(lsblk -no pkname "$ESP_DEV" 2>/dev/null | head -n1 || true)
     esp_partnum=$(cat "/sys/class/block/$(basename "$ESP_DEV")/partition" 2>/dev/null || echo 1)
     if [[ -n $esp_disk ]]; then
+      local existing_num
+      while IFS= read -r existing_num; do
+        [[ -n $existing_num ]] && efibootmgr -b "$existing_num" -B >/dev/null 2>&1 || true
+      done < <(efibootmgr 2>/dev/null | sed -nE 's/^Boot([0-9A-Fa-f]{4})\*? Tsukuyomi OS\b.*/\1/p')
       efibootmgr --create --disk "/dev/$esp_disk" --part "$esp_partnum" \
         --label "Tsukuyomi OS" --loader '\EFI\limine\limine_x64.efi' --unicode || true
     fi
@@ -112,6 +116,7 @@ tsukuyomi_bootloader() {
     run arch-chroot /mnt mount /.snapshots
     run arch-chroot /mnt chmod 750 /.snapshots
     chroot_has limine-snapper-sync && run arch-chroot /mnt systemctl enable limine-snapper-sync.service
+    run arch-chroot /mnt systemctl enable snapper-cleanup.timer || true
     tsukuyomi_limine_repoint_default /mnt/boot/limine.conf
   fi
 }
