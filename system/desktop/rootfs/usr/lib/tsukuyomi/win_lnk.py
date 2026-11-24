@@ -57,6 +57,7 @@ def inspect_pe(exe_path: Path) -> dict[str, object]:
         "company": "",
         "version": "",
         "installer_hint": "msi" if suffix == ".msi" else "unknown",
+        "nsis_archive": False,
     }
 
     if suffix == ".lnk":
@@ -83,6 +84,14 @@ def inspect_pe(exe_path: Path) -> dict[str, object]:
             if len(pe_header) != 6 or pe_header[:4] != b"PE\x00\x00":
                 raise ValueError
             machine = struct.unpack_from("<H", pe_header, 4)[0]
+            # NSIS scans 512-byte boundaries for its firstheader. The installer
+            # stub is small even when the compressed application is hundreds of MB.
+            file.seek(0)
+            stub = file.read(1024 * 1024)
+            signature = b"\xef\xbe\xad\xdeNullsoftInst"
+            info["nsis_archive"] = any(
+                stub.startswith(signature, offset + 4) for offset in range(512, len(stub), 512)
+            )
     except (OSError, ValueError):
         info["error"] = "This file is not a readable x86 or x64 Windows executable."
         return info
@@ -117,7 +126,7 @@ def inspect_pe(exe_path: Path) -> dict[str, object]:
         lower_all = " ".join([exe_path.name, info["description"], info["company"]]).lower()
         if "inno" in lower_all:
             info["installer_hint"] = "inno"
-        elif "nullsoft" in lower_all or "nsis" in lower_all:
+        elif info["nsis_archive"] or "nullsoft" in lower_all or "nsis" in lower_all:
             info["installer_hint"] = "nsis"
         elif any(tok in lower_all for tok in ("setup", "install", "installer")):
             info["installer_hint"] = "setup"

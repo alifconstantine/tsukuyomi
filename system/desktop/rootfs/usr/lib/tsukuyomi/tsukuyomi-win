@@ -18,11 +18,11 @@ import time
 from contextlib import contextmanager
 from pathlib import Path, PureWindowsPath
 from typing import Optional
-from urllib.parse import unquote, urlparse
 
 from compat_common import (
     atomic_write_json,
     atomic_write_text,
+    decode_file_uri,
     detect_hypr_monitor,
     detect_theme_dark,
     format_desktop_exec,
@@ -193,10 +193,20 @@ def _run_prefix_setup(
     command = ["sh", "-c", '"$@" && wineserver -w', "tsukuyomi-wine", *argv]
     if sandbox:
         command = _build_bwrap_argv(command, env=env, prefix=prefix, ro_binds=[], cwd=None)
-    subprocess.run(
-        command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        timeout=timeout, check=True,
-    )
+    with subprocess.Popen(
+        command, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+    ) as process:
+        try:
+            status = process.wait(timeout=timeout)
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise
+    if status != 0:
+        raise subprocess.CalledProcessError(status, command)
 
 
 def _wait_for_wine_children(argv: list[str]) -> list[str]:
@@ -813,14 +823,6 @@ def _installer_binds(src: Path, mount_root: Path, share_folder: bool) -> list[tu
     return [(src, mount_root / src.name)]
 
 
-def _decode_uri_path(raw: str) -> str:
-    if raw.startswith("file://"):
-        parsed = urlparse(raw)
-        if parsed.scheme == "file":
-            return unquote(parsed.path)
-    return raw
-
-
 class InstallCancelled(Exception):
     pass
 
@@ -882,7 +884,7 @@ def cmd_install(args: argparse.Namespace) -> int:
 
 
 def _install(args: argparse.Namespace) -> int:
-    src = Path(_decode_uri_path(args.file)).expanduser().resolve()
+    src = Path(decode_file_uri(args.file)).expanduser().resolve()
     if not src.is_file():
         raise ValueError(f"File not found: {src}")
 
@@ -945,15 +947,19 @@ def _install(args: argparse.Namespace) -> int:
             args, src, lnk_extra_args, app_name, prefix.name, lock_fd=lock_fd,
             sandbox=sandbox, wayland=wayland, dxvk=dxvk, runner=runner,
             antigravity_setup=pe_info["product_name"] == "Antigravity" and pe_info["company"] == "Google",
+            nsis_setup=bool(pe_info["nsis_archive"]),
         )
 
 
 def _install_in_prefix(
     args: argparse.Namespace, src: Path, lnk_extra_args: list[str], app_name: str, slug: str, *,
     lock_fd: int, sandbox: bool, wayland: bool, dxvk: bool, runner: str, antigravity_setup: bool,
+    nsis_setup: bool,
 ) -> int:
     mode = args.mode
     msi = src.suffix.lower() == ".msi"
+    if args.progress:
+        print("TSUKUYOMI_PROGRESS environment", file=sys.stderr, flush=True)
     # MSI dialogs can paint embedded black text. Use the standard light
     # controls during setup, then apply the desktop preference at app launch.
     prefix = _ensure_prefix(
@@ -961,8 +967,13 @@ def _install_in_prefix(
         light_setup=msi,
     )
     env = _wine_env(prefix, wayland=wayland, dxvk=dxvk, runner=runner)
+    # Z: is removed in a sandbox. An inherited host directory has no Windows
+    # representation there, which breaks installers that spawn a child process.
+    sandbox_cwd = _prefix_path(prefix, "drive_c") if sandbox else None
 
     if mode == "portable" and not args.pin_portable:
+        if args.progress:
+            print("TSUKUYOMI_PROGRESS setup", file=sys.stderr, flush=True)
         base_bin = ["umu-run"] if runner == "umu" else ["wine"]
         if sandbox:
             mount_root = Path("/mnt/tsukuyomi-src")
@@ -974,7 +985,7 @@ def _install_in_prefix(
             try:
                 argv = _build_bwrap_argv(
                     _wait_for_wine_children(base_bin + [run_target] + lnk_extra_args),
-                    env=env, prefix=prefix, ro_binds=ro_binds, cwd=None,
+                    env=env, prefix=prefix, ro_binds=ro_binds, cwd=sandbox_cwd,
                 )
                 subprocess.run(argv, env=env, stdout=sys.stderr, check=True)
             finally:
@@ -1013,20 +1024,23 @@ def _install_in_prefix(
         return 0
 
     e_drive = prefix / "dosdevices" / "e:"
-    if runner == "wine" and antigravity_setup:
-        # Google's NSIS build treats the Wine PowerShell stub's exit 0 as
-        # proof that Get-CimInstance found a process. Use its tasklist path.
-        env["WINEDLLOVERRIDES"] += ";powershell.exe="
+    if runner == "wine" and (nsis_setup or antigravity_setup):
+        # Older electron-builder NSIS templates treat the Wine PowerShell
+        # stub's exit 0 as proof that the app is running. Use their tasklist
+        # fallback while permitting an actual Windows PowerShell installation.
+        env["WINEDLLOVERRIDES"] += ";powershell.exe=n"
     base_bin = ["umu-run"] if runner == "umu" else ["wine"]
     if msi:
         base_bin += ["msiexec", "/i"]
+    if args.progress:
+        print("TSUKUYOMI_PROGRESS setup", file=sys.stderr, flush=True)
     if sandbox:
         mount_root = Path("/mnt/tsukuyomi-src")
         ro_binds = _installer_binds(src, mount_root, args.share_installer_folder)
         target_arg = f"E:\\{src.name}"
         argv = _build_bwrap_argv(
             _setup_with_status(base_bin + [target_arg] + lnk_extra_args),
-            env=env, prefix=prefix, ro_binds=ro_binds, cwd=None, lock_fd=lock_fd,
+            env=env, prefix=prefix, ro_binds=ro_binds, cwd=sandbox_cwd, lock_fd=lock_fd,
         )
         e_drive.unlink(missing_ok=True)
         e_drive.symlink_to(mount_root)
@@ -1412,6 +1426,7 @@ def main(argv: list[str]) -> int:
 
     p_inst = sub.add_parser("install")
     p_inst.add_argument("--file", required=True)
+    p_inst.add_argument("--progress", action="store_true")
     p_inst.add_argument("--name", default="")
     p_inst.add_argument("--mode", choices=("isolated", "portable", "existing"), default="isolated")
     p_inst.add_argument("--slug", default="")
@@ -1452,7 +1467,11 @@ def main(argv: list[str]) -> int:
         print(json.dumps(check_status()))
         return 0
     if args.cmd == "inspect":
-        src = Path(_decode_uri_path(args.file)).expanduser().resolve()
+        try:
+            src = Path(decode_file_uri(args.file)).expanduser().resolve()
+        except ValueError as exc:
+            print(json.dumps({"error": str(exc)}))
+            return 1
         if not src.is_file() or src.suffix.lower() not in (".exe", ".msi", ".lnk"):
             print(json.dumps({"error": "Choose a Windows .exe, .msi or .lnk file."}))
             return 1

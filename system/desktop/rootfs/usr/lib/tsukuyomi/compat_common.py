@@ -13,10 +13,20 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Iterable, Optional
+from urllib.parse import unquote, urlparse
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 ANDROID_PKG_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$")
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def decode_file_uri(raw: str) -> str:
+    if raw.startswith("file://"):
+        uri = urlparse(raw)
+        if uri.netloc not in ("", "localhost"):
+            raise ValueError("Choose a file stored on this computer.")
+        return unquote(uri.path)
+    return raw
 
 
 def xdg_data_home() -> Path:

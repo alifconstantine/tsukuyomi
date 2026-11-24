@@ -339,11 +339,14 @@ class CompatTests(unittest.TestCase):
             prefix = Path(tmp)
             env = {"WINEPREFIX": tmp}
             with mock.patch.object(tsukuyomi_win, "_build_bwrap_argv", return_value=["bwrap", "setup"]) as sandbox, \
-                    mock.patch.object(tsukuyomi_win.subprocess, "run") as run:
+                    mock.patch.object(tsukuyomi_win.subprocess, "Popen") as run:
+                process = run.return_value.__enter__.return_value
+                process.wait.return_value = 0
                 tsukuyomi_win._run_prefix_setup(["wineboot", "--init"], env=env, prefix=prefix,
                                                 sandbox=True, timeout=120)
             self.assertIn("wineserver -w", sandbox.call_args.args[0][2])
             self.assertEqual(run.call_args.args[0], ["bwrap", "setup"])
+            process.wait.assert_called_once_with(timeout=120)
 
     def test_setup_reports_success_with_autolaunched_app_still_running(self) -> None:
         candidates = [{"exe": "/example/App.exe"}]
@@ -421,6 +424,35 @@ class CompatTests(unittest.TestCase):
                 path.write_bytes(b"<html>download error</html>")
                 self.assertIn("error", win_lnk.inspect_pe(path), name)
 
+    def test_windows_setup_uses_mapped_working_directory_and_nsis_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "Setup.exe"
+            stub = bytearray(1024)
+            stub[:2] = b"MZ"
+            struct.pack_into("<I", stub, 60, 64)
+            stub[64:70] = b"PE\x00\x00\x64\x86"
+            signature = b"\xef\xbe\xad\xdeNullsoftInst"
+            stub[516:516 + len(signature)] = signature
+            source.write_bytes(stub)
+            self.assertTrue(win_lnk.inspect_pe(source)["nsis_archive"])
+            prefix = root / "app"
+            (prefix / "drive_c").mkdir(parents=True)
+            (prefix / "dosdevices").mkdir()
+            args = mock.Mock(mode="isolated", progress=False, share_installer_folder=False)
+            with mock.patch.dict(os.environ, {"XDG_DATA_HOME": tmp, "XDG_RUNTIME_DIR": tmp}), \
+                 mock.patch.object(tsukuyomi_win, "_ensure_prefix", return_value=prefix), \
+                 mock.patch.object(tsukuyomi_win, "_build_bwrap_argv", return_value=["bwrap"]) as build, \
+                 mock.patch.object(tsukuyomi_win, "_run_sandbox_setup", return_value=[]), \
+                 mock.patch("sys.stdout", io.StringIO()):
+                self.assertEqual(tsukuyomi_win._install_in_prefix(
+                    args, source, [], "Example", "app", lock_fd=0, sandbox=True,
+                    wayland=False, dxvk=False, runner="wine", antigravity_setup=False, nsis_setup=True,
+                ), 0)
+            self.assertEqual(build.call_args.kwargs["cwd"], prefix / "drive_c")
+            self.assertIn("powershell.exe=n", build.call_args.kwargs["env"]["WINEDLLOVERRIDES"])
+            self.assertFalse((prefix / "dosdevices" / "e:").is_symlink())
+
     def test_windows_scan_finds_uppercase_and_local_install(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             prefix = Path(tmp) / "demo"
@@ -443,8 +475,10 @@ class CompatTests(unittest.TestCase):
             self.assertTrue(tsukuyomi_win._is_safe_portable_bundle_dir(app_dir))
 
     def test_file_uri_decoding(self) -> None:
-        self.assertEqual(tsukuyomi_win._decode_uri_path("file:///home/u/My%20Setup.exe"), "/home/u/My Setup.exe")
-        self.assertEqual(tsukuyomi_win._decode_uri_path("/plain/path.exe"), "/plain/path.exe")
+        self.assertEqual(compat_common.decode_file_uri("file:///home/u/My%20Setup.exe"), "/home/u/My Setup.exe")
+        self.assertEqual(compat_common.decode_file_uri("/plain/path.exe"), "/plain/path.exe")
+        with self.assertRaises(ValueError):
+            compat_common.decode_file_uri("file://another-computer/share/Setup.exe")
 
     def test_windows_cancel_cleans_only_the_new_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
